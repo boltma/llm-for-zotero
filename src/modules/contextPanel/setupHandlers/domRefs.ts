@@ -34,6 +34,8 @@ export type PanelDomRefs = {
   historyUndo: HTMLDivElement | null;
   historyUndoText: HTMLSpanElement | null;
   historyUndoBtn: HTMLButtonElement | null;
+  claudeSystemToggleBtn: HTMLButtonElement | null;
+  claudeSystemToggleIcon: HTMLSpanElement | null;
   selectTextBtn: HTMLButtonElement | null;
   screenshotBtn: HTMLButtonElement | null;
   uploadBtn: HTMLButtonElement | null;
@@ -166,6 +168,12 @@ export function getPanelDomRefs(body: Element): PanelDomRefs {
     historyUndoBtn: body.querySelector(
       "#llm-history-undo-btn",
     ) as HTMLButtonElement | null,
+    claudeSystemToggleBtn: body.querySelector(
+      "#llm-claude-system-toggle",
+    ) as HTMLButtonElement | null,
+    claudeSystemToggleIcon: body.querySelector(
+      "#llm-claude-system-toggle-icon",
+    ) as HTMLSpanElement | null,
     selectTextBtn: body.querySelector(
       "#llm-select-text",
     ) as HTMLButtonElement | null,

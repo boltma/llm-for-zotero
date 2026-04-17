@@ -48,14 +48,14 @@ type EffectiveRequestConfigShape = {
   model: string;
   apiBase: string;
   apiKey: string;
-  authMode: "api_key" | "codex_auth" | "webchat"; // [webchat]
+  authMode: "api_key" | "codex_auth" | "copilot_auth" | "webchat";
   providerProtocol?:
     | "codex_responses"
     | "responses_api"
     | "openai_chat_compat"
     | "anthropic_messages"
     | "gemini_native"
-    | "web_sync"; // [webchat]
+    | "web_sync";
   modelEntryId?: string;
   modelProviderLabel?: string;
   reasoning: LLMReasoningConfig | undefined;
@@ -140,6 +140,16 @@ export type AgentEngineDeps = {
     model?: string;
     apiBase?: string;
     apiKey?: string;
+    authMode?: "api_key" | "codex_auth" | "copilot_auth" | "webchat";
+    providerProtocol?:
+      | "codex_responses"
+      | "responses_api"
+      | "openai_chat_compat"
+      | "anthropic_messages"
+      | "gemini_native"
+      | "web_sync";
+    modelEntryId?: string;
+    modelProviderLabel?: string;
     reasoning?: LLMReasoningConfig;
     advanced?: AdvancedModelParams;
   }) => EffectiveRequestConfigShape;
@@ -213,6 +223,16 @@ export async function sendAgentTurn(
     model?: string;
     apiBase?: string;
     apiKey?: string;
+    authMode?: "api_key" | "codex_auth" | "copilot_auth" | "webchat";
+    providerProtocol?:
+      | "codex_responses"
+      | "responses_api"
+      | "openai_chat_compat"
+      | "anthropic_messages"
+      | "gemini_native"
+      | "web_sync";
+    modelEntryId?: string;
+    modelProviderLabel?: string;
     reasoning?: LLMReasoningConfig;
     advanced?: AdvancedModelParams;
     displayQuestion?: string;
@@ -227,9 +247,27 @@ export async function sendAgentTurn(
   deps: AgentEngineDeps,
 ): Promise<void> {
   const {
-    body, item, question, images, model, apiBase, apiKey, reasoning, advanced,
-    displayQuestion, selectedTexts, selectedTextSources, selectedTextPaperContexts,
-    selectedTextNoteContexts, paperContexts, fullTextPaperContexts, attachments,
+    body,
+    item,
+    question,
+    images,
+    model,
+    apiBase,
+    apiKey,
+    authMode,
+    providerProtocol,
+    modelEntryId,
+    modelProviderLabel,
+    reasoning,
+    advanced,
+    displayQuestion,
+    selectedTexts,
+    selectedTextSources,
+    selectedTextPaperContexts,
+    selectedTextNoteContexts,
+    paperContexts,
+    fullTextPaperContexts,
+    attachments,
   } = opts;
   await deps.ensureConversationLoaded(item);
   const conversationKey = deps.getConversationKey(item);
@@ -240,6 +278,10 @@ export async function sendAgentTurn(
     model,
     apiBase,
     apiKey,
+    authMode,
+    providerProtocol,
+    modelEntryId,
+    modelProviderLabel,
     reasoning,
     advanced,
   });
@@ -379,6 +421,8 @@ export async function sendAgentTurn(
     modelEntryId: effectiveRequestConfig.modelEntryId,
     modelProviderLabel: effectiveRequestConfig.modelProviderLabel,
     streaming: true,
+    waitingAnimationStartedAt:
+      effectiveRequestConfig.modelProviderLabel === "Claude Code" ? Date.now() : undefined,
     reasoningOpen: false,
   };
   historyForRun.push(assistantMessage);
@@ -414,7 +458,6 @@ export async function sendAgentTurn(
       conversationKey,
       AbortControllerCtor ? new AbortControllerCtor() : null,
     );
-    const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
 
     const pushTraceEvent = (runId: string, event: AgentEvent) => {
       const list = deps.agentRunTraceCache.get(runId) || [];
@@ -463,28 +506,27 @@ export async function sendAgentTurn(
             setStatusSafely(event.reason, "sending");
             break;
           case "message_delta":
-            assistantMessage.text += deps.sanitizeText(event.text);
-            break;
+            assistantMessage.pendingFinalText =
+              `${assistantMessage.pendingFinalText || ""}${deps.sanitizeText(event.text)}`;
+            return;
           case "message_rollback":
             if (typeof event.length === "number" && event.length > 0) {
-              assistantMessage.text = assistantMessage.text.slice(
+              assistantMessage.pendingFinalText = (assistantMessage.pendingFinalText || "").slice(
                 0,
-                Math.max(0, assistantMessage.text.length - event.length),
+                Math.max(0, (assistantMessage.pendingFinalText || "").length - event.length),
               );
             }
-            break;
+            return;
           case "final":
-            if (!assistantMessage.text.trim()) {
-              assistantMessage.text = deps.sanitizeText(event.text);
-            }
+            assistantMessage.text =
+              deps.sanitizeText(event.text) ||
+              assistantMessage.pendingFinalText ||
+              assistantMessage.text;
+            assistantMessage.pendingFinalText = undefined;
             assistantMessage.streaming = false;
             break;
           default:
             break;
-        }
-        if (event.type === "message_delta" || event.type === "message_rollback") {
-          queueRefresh();
-          return;
         }
         refreshChatSafely();
         await deps.waitForUiStep();
@@ -502,11 +544,16 @@ export async function sendAgentTurn(
     assistantMessage.agentRunId = outcome.runId;
     assistantMessage.runMode = "agent";
     const finalOutcomeText =
-      outcome.kind === "completed" ? outcome.text : assistantMessage.text;
+      outcome.kind === "completed"
+        ? outcome.text
+        : assistantMessage.pendingFinalText || assistantMessage.text;
     assistantMessage.text =
       deps.sanitizeText(finalOutcomeText) ||
+      assistantMessage.pendingFinalText ||
       assistantMessage.text ||
       "No response.";
+    assistantMessage.pendingFinalText = undefined;
+    assistantMessage.waitingAnimationStartedAt = undefined;
     assistantMessage.streaming = false;
     refreshChatSafely();
     await persistAssistantOnce();
@@ -543,6 +590,17 @@ export async function retryAgentTurn(
   model: string | undefined,
   apiBase: string | undefined,
   apiKey: string | undefined,
+  authMode: "api_key" | "codex_auth" | "copilot_auth" | "webchat" | undefined,
+  providerProtocol:
+    | "codex_responses"
+    | "responses_api"
+    | "openai_chat_compat"
+    | "anthropic_messages"
+    | "gemini_native"
+    | "web_sync"
+    | undefined,
+  modelEntryId: string | undefined,
+  modelProviderLabel: string | undefined,
   reasoning: LLMReasoningConfig | undefined,
   advanced: AdvancedModelParams | undefined,
   deps: AgentEngineDeps,
@@ -571,6 +629,7 @@ export async function retryAgentTurn(
   assistantMessage.agentRunId = undefined;
   assistantMessage.runMode = "agent";
   assistantMessage.streaming = true;
+  assistantMessage.waitingAnimationStartedAt = Date.now();
   assistantMessage.reasoningSummary = undefined;
   assistantMessage.reasoningDetails = undefined;
   assistantMessage.reasoningOpen = deps.isReasoningExpandedByDefault();
@@ -580,6 +639,10 @@ export async function retryAgentTurn(
     model,
     apiBase,
     apiKey,
+    authMode,
+    providerProtocol,
+    modelEntryId,
+    modelProviderLabel,
     reasoning,
     advanced,
   });
@@ -661,7 +724,6 @@ export async function retryAgentTurn(
       conversationKey,
       AbortControllerCtor ? new AbortControllerCtor() : null,
     );
-    const queueRefresh = deps.createQueuedRefresh(refreshChatSafely);
 
     const pushTraceEvent = (runId: string, event: AgentEvent) => {
       const list = deps.agentRunTraceCache.get(runId) || [];
@@ -710,28 +772,27 @@ export async function retryAgentTurn(
             setStatusSafely(event.reason, "sending");
             break;
           case "message_delta":
-            assistantMessage.text += deps.sanitizeText(event.text);
-            break;
+            assistantMessage.pendingFinalText =
+              `${assistantMessage.pendingFinalText || ""}${deps.sanitizeText(event.text)}`;
+            return;
           case "message_rollback":
             if (typeof event.length === "number" && event.length > 0) {
-              assistantMessage.text = assistantMessage.text.slice(
+              assistantMessage.pendingFinalText = (assistantMessage.pendingFinalText || "").slice(
                 0,
-                Math.max(0, assistantMessage.text.length - event.length),
+                Math.max(0, (assistantMessage.pendingFinalText || "").length - event.length),
               );
             }
-            break;
+            return;
           case "final":
-            if (!assistantMessage.text.trim()) {
-              assistantMessage.text = deps.sanitizeText(event.text);
-            }
+            assistantMessage.text =
+              deps.sanitizeText(event.text) ||
+              assistantMessage.pendingFinalText ||
+              assistantMessage.text;
+            assistantMessage.pendingFinalText = undefined;
             assistantMessage.streaming = false;
             break;
           default:
             break;
-        }
-        if (event.type === "message_delta" || event.type === "message_rollback") {
-          queueRefresh();
-          return;
         }
         refreshChatSafely();
         await deps.waitForUiStep();
@@ -749,11 +810,16 @@ export async function retryAgentTurn(
     assistantMessage.agentRunId = outcome.runId;
     assistantMessage.runMode = "agent";
     const finalOutcomeText =
-      outcome.kind === "completed" ? outcome.text : assistantMessage.text;
+      outcome.kind === "completed"
+        ? outcome.text
+        : assistantMessage.pendingFinalText || assistantMessage.text;
     assistantMessage.text =
       deps.sanitizeText(finalOutcomeText) ||
+      assistantMessage.pendingFinalText ||
       assistantMessage.text ||
       "No response.";
+    assistantMessage.pendingFinalText = undefined;
+    assistantMessage.waitingAnimationStartedAt = undefined;
     assistantMessage.streaming = false;
     refreshChatSafely();
     await persistAssistantOnce();

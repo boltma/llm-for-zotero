@@ -10,6 +10,15 @@ import {
   deleteTurnMessages as deleteStoredTurnMessages,
   StoredChatMessage,
 } from "../../utils/chatStore";
+import { loadClaudeConversation } from "../../claudeCode/store";
+import {
+  appendClaudeConversationMessage,
+  deleteClaudeConversationTurnMessages,
+  getClaudeBridgeRuntime,
+  updateLatestClaudeConversationAssistantMessage,
+  updateLatestClaudeConversationUserMessage,
+} from "../../claudeCode/runtime";
+import { isClaudeConversationKey } from "../../claudeCode/constants";
 import {
   callLLMStream,
   ChatFileAttachment,
@@ -132,6 +141,7 @@ import {
 import {
   isGlobalPortalItem,
   resolveActiveNoteSession,
+  resolveConversationSystemForItem,
   resolveDisplayConversationKind,
 } from "./portalScope";
 import { buildChatHistoryNotePayload, readNoteSnapshot } from "./notes";
@@ -142,7 +152,7 @@ import { renderAgentTrace } from "./agentTrace/render";
 import { toFileUrl } from "../../utils/pathFileUrl";
 import { replaceOwnerAttachmentRefs } from "../../utils/attachmentRefStore";
 import { decorateAssistantCitationLinks } from "./assistantCitationLinks";
-import { getAgentRuntime } from "../../agent";
+import { getCoreAgentRuntime } from "../../agent/index";
 import { getAgentRunTrace } from "../../agent/store/traceStore";
 import {
   applyHistoryCompression,
@@ -746,14 +756,49 @@ function applyChatScrollPolicy(
   persistChatScrollSnapshotByKey(conversationKey, chatBox);
 }
 
+async function loadStoredConversationByKey(
+  conversationKey: number,
+  limit: number,
+): Promise<StoredChatMessage[]> {
+  return isClaudeConversationKey(conversationKey)
+    ? loadClaudeConversation(conversationKey, limit)
+    : loadConversation(conversationKey, limit);
+}
+
+async function updateStoredLatestUserMessageByConversation(
+  conversationKey: number,
+  message: Parameters<typeof updateStoredLatestUserMessage>[1],
+): Promise<void> {
+  if (isClaudeConversationKey(conversationKey)) {
+    await updateLatestClaudeConversationUserMessage(conversationKey, message);
+    return;
+  }
+  await updateStoredLatestUserMessage(conversationKey, message);
+}
+
+async function updateStoredLatestAssistantMessageByConversation(
+  conversationKey: number,
+  message: Parameters<typeof updateStoredLatestAssistantMessage>[1],
+): Promise<void> {
+  if (isClaudeConversationKey(conversationKey)) {
+    await updateLatestClaudeConversationAssistantMessage(conversationKey, message);
+    return;
+  }
+  await updateStoredLatestAssistantMessage(conversationKey, message);
+}
+
 async function persistConversationMessage(
   conversationKey: number,
   message: StoredChatMessage,
 ): Promise<void> {
   try {
-    await appendStoredMessage(conversationKey, message);
-    await pruneConversation(conversationKey, PERSISTED_HISTORY_LIMIT);
-    const storedMessages = await loadConversation(
+    if (isClaudeConversationKey(conversationKey)) {
+      await appendClaudeConversationMessage(conversationKey, message);
+    } else {
+      await appendStoredMessage(conversationKey, message);
+      await pruneConversation(conversationKey, PERSISTED_HISTORY_LIMIT);
+    }
+    const storedMessages = await loadStoredConversationByKey(
       conversationKey,
       PERSISTED_HISTORY_LIMIT,
     );
@@ -867,7 +912,7 @@ export async function ensureConversationLoaded(
 
   const task = (async () => {
     try {
-      const storedMessages = await loadConversation(
+      const storedMessages = await loadStoredConversationByKey(
         conversationKey,
         PERSISTED_HISTORY_LIMIT,
       );
@@ -1209,7 +1254,7 @@ export type EffectiveRequestConfig = {
   model: string;
   apiBase: string;
   apiKey: string;
-  authMode: "api_key" | "codex_auth" | "webchat"; // [webchat]
+  authMode: "api_key" | "codex_auth" | "copilot_auth" | "webchat";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
@@ -1222,43 +1267,78 @@ function resolveEffectiveRequestConfig(params: {
   model?: string;
   apiBase?: string;
   apiKey?: string;
-  authMode?: "api_key" | "codex_auth" | "webchat"; // [webchat]
+  authMode?: "api_key" | "codex_auth" | "copilot_auth" | "webchat";
   providerProtocol?: ProviderProtocol;
   modelEntryId?: string;
   modelProviderLabel?: string;
   reasoning?: LLMReasoningConfig;
   advanced?: AdvancedModelParams;
 }): EffectiveRequestConfig {
-  const fallbackEntry = getSelectedModelEntryForItem(params.item.id);
+  const hasExplicitProviderMetadata = Boolean(
+    params.modelProviderLabel ||
+      params.providerProtocol ||
+      params.authMode ||
+      params.modelEntryId,
+  );
+  const fallbackEntry = hasExplicitProviderMetadata
+    ? null
+    : getSelectedModelEntryForItem(params.item.id);
   const explicitEntry =
-    params.model || params.apiBase || params.apiKey
-      ? getAvailableModelEntries().find(
-          (entry) =>
-            entry.model === (params.model || "").trim() &&
-            entry.apiBase === (params.apiBase || "").trim() &&
-            entry.apiKey === (params.apiKey || "").trim(),
-        ) || null
-      : null;
+    hasExplicitProviderMetadata && params.modelProviderLabel === "Claude Code"
+      ? {
+          entryId:
+            params.modelEntryId ||
+            `claude_runtime::${(params.model || "sonnet").trim() || "sonnet"}`,
+          model: (params.model || "sonnet").trim() || "sonnet",
+          apiBase: params.apiBase ?? "",
+          apiKey: params.apiKey ?? "",
+          authMode: params.authMode || "api_key",
+          providerProtocol:
+            params.providerProtocol || "anthropic_messages",
+          providerLabel: params.modelProviderLabel,
+          advanced: params.advanced,
+        }
+      : params.model || params.apiBase || params.apiKey
+        ? getAvailableModelEntries().find(
+            (entry) =>
+              entry.model === (params.model || "").trim() &&
+              entry.apiBase === (params.apiBase || "").trim() &&
+              entry.apiKey === (params.apiKey || "").trim(),
+          ) || null
+        : null;
   const model = (
     params.model ||
+    explicitEntry?.model ||
     fallbackEntry?.model ||
     getStringPref("modelPrimary") ||
     getStringPref("model") ||
     "gpt-4o-mini"
   ).trim();
-  const apiBase = (params.apiBase || fallbackEntry?.apiBase || "").trim();
-  const apiKey = (params.apiKey || fallbackEntry?.apiKey || "").trim();
+  const apiBase = (
+    params.apiBase !== undefined
+      ? params.apiBase
+      : explicitEntry?.apiBase || fallbackEntry?.apiBase || ""
+  ).trim();
+  const apiKey = (
+    params.apiKey !== undefined
+      ? params.apiKey
+      : explicitEntry?.apiKey || fallbackEntry?.apiKey || ""
+  ).trim();
   const authMode =
     params.authMode ||
-    (fallbackEntry?.authMode === "webchat" ? "webchat" :
-     fallbackEntry?.authMode === "codex_auth" ? "codex_auth" : "api_key");
+    explicitEntry?.authMode ||
+    (fallbackEntry?.authMode === "webchat"
+      ? "webchat"
+      : fallbackEntry?.authMode === "codex_auth"
+        ? "codex_auth"
+        : fallbackEntry?.authMode === "copilot_auth"
+          ? "copilot_auth"
+          : "api_key");
   const reasoning =
     params.reasoning ||
     getSelectedReasoningForItem(params.item.id, model, apiBase);
   const advanced =
-    params.advanced ||
-    getAdvancedModelParamsForEntry(fallbackEntry?.entryId) ||
-    fallbackEntry?.advanced;
+    params.advanced || explicitEntry?.advanced || fallbackEntry?.advanced;
   return {
     model,
     apiBase,
@@ -1448,6 +1528,107 @@ function waitForUiStep(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);
   });
+}
+
+const ROSE_LOADER_SVG_NS = "http://www.w3.org/2000/svg";
+
+function mountClaudeRoseThreeLoader(host: HTMLElement, startedAt: number): void {
+  const doc = host.ownerDocument;
+  if (!doc) return;
+  const win = doc.defaultView;
+  if (!win) return;
+
+  const svg = doc.createElementNS(ROSE_LOADER_SVG_NS, "svg") as unknown as SVGSVGElement;
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("llm-rose-loader-svg");
+
+  const group = doc.createElementNS(ROSE_LOADER_SVG_NS, "g") as unknown as SVGGElement;
+  const path = doc.createElementNS(ROSE_LOADER_SVG_NS, "path") as unknown as SVGPathElement;
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  path.setAttribute("stroke-width", "3.6");
+  path.setAttribute("opacity", "0.12");
+  group.appendChild(path);
+
+  const particleCount = 28;
+  const trailSpan = 0.31;
+  const durationMs = 5300;
+  const rotationDurationMs = 28000;
+  const pulseDurationMs = 4400;
+  const roseA = 9.2;
+  const roseABoost = 0.6;
+  const roseBreathBase = 0.72;
+  const roseBreathBoost = 0.28;
+  const roseScale = 3.25;
+  const particles = Array.from({ length: particleCount }, () => {
+    const circle = doc.createElementNS(ROSE_LOADER_SVG_NS, "circle") as unknown as SVGCircleElement;
+    circle.setAttribute("fill", "currentColor");
+    group.appendChild(circle);
+    return circle;
+  });
+
+  svg.appendChild(group);
+  host.replaceChildren(svg);
+
+  const normalizeProgress = (progress: number) => ((progress % 1) + 1) % 1;
+  const getDetailScale = (elapsedMs: number) => {
+    const pulseProgress = (elapsedMs % pulseDurationMs) / pulseDurationMs;
+    const pulseAngle = pulseProgress * Math.PI * 2;
+    return 0.52 + ((Math.sin(pulseAngle + 0.55) + 1) / 2) * 0.48;
+  };
+  const getRotation = (elapsedMs: number) =>
+    -((elapsedMs % rotationDurationMs) / rotationDurationMs) * 360;
+  const getPoint = (progress: number, detailScale: number) => {
+    const t = progress * Math.PI * 2;
+    const r =
+      (roseA + roseABoost * detailScale) *
+      (roseBreathBase + roseBreathBoost * detailScale) *
+      Math.cos(3 * t);
+    return {
+      x: 50 + Math.cos(t) * r * roseScale,
+      y: 50 + Math.sin(t) * r * roseScale,
+    };
+  };
+  const buildPath = (detailScale: number, steps = 180) => {
+    let d = "";
+    for (let index = 0; index <= steps; index += 1) {
+      const point = getPoint(index / steps, detailScale);
+      d += `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)} `;
+    }
+    return d.trim();
+  };
+
+  let rafId = 0;
+  const render = () => {
+    if (!host.isConnected) {
+      if (rafId) win.cancelAnimationFrame(rafId);
+      return;
+    }
+    const elapsedMs = Date.now() - startedAt;
+    const progress = (elapsedMs % durationMs) / durationMs;
+    const detailScale = getDetailScale(elapsedMs);
+    group.setAttribute("transform", `rotate(${getRotation(elapsedMs).toFixed(3)} 50 50)`);
+    path.setAttribute("d", buildPath(detailScale));
+    for (let index = 0; index < particles.length; index += 1) {
+      const tailOffset = index / Math.max(1, particleCount - 1);
+      const point = getPoint(
+        normalizeProgress(progress - tailOffset * trailSpan),
+        detailScale,
+      );
+      const fade = Math.pow(1 - tailOffset, 0.56);
+      const particle = particles[index]!;
+      particle.setAttribute("cx", point.x.toFixed(2));
+      particle.setAttribute("cy", point.y.toFixed(2));
+      particle.setAttribute("r", (0.6 + fade * 1.8).toFixed(2));
+      particle.setAttribute("opacity", (0.08 + fade * 0.92).toFixed(3));
+    }
+    rafId = win.requestAnimationFrame(render);
+  };
+
+  rafId = win.requestAnimationFrame(render);
 }
 
 export type LatestRetryPair = {
@@ -2074,7 +2255,7 @@ export async function editLatestUserMessageAndRetry(
   retryPair.userMessage.attachmentActiveIndex = undefined;
 
   try {
-    await updateStoredLatestUserMessage(conversationKey, {
+    await updateStoredLatestUserMessageByConversation(conversationKey, {
       text: retryPair.userMessage.text,
       timestamp: retryPair.userMessage.timestamp,
       runMode: retryPair.userMessage.runMode,
@@ -2090,7 +2271,7 @@ export async function editLatestUserMessageAndRetry(
       attachments: retryPair.userMessage.attachments,
     });
 
-    const storedMessages = await loadConversation(
+    const storedMessages = await loadStoredConversationByKey(
       conversationKey,
       PERSISTED_HISTORY_LIMIT,
     );
@@ -2113,6 +2294,10 @@ export async function editLatestUserMessageAndRetry(
       model,
       apiBase,
       apiKey,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       reasoning,
       advanced,
     );
@@ -2210,7 +2395,7 @@ export async function retryLatestAssistantResponse(
   const finalizeCancelledAssistant = async () => {
     finalizeCancelledAssistantMessage(assistantMessage);
     refreshChatSafely();
-    await updateStoredLatestAssistantMessage(conversationKey, {
+    await updateStoredLatestAssistantMessageByConversation(conversationKey, {
       text: assistantMessage.text,
       timestamp: assistantMessage.timestamp,
       runMode: assistantMessage.runMode,
@@ -2266,7 +2451,7 @@ export async function retryLatestAssistantResponse(
       contextPlan.fullTextPaperContexts.length
         ? contextPlan.fullTextPaperContexts
       : undefined;
-    await updateStoredLatestUserMessage(conversationKey, {
+    await updateStoredLatestUserMessageByConversation(conversationKey, {
       text: retryPair.userMessage.text,
       timestamp: retryPair.userMessage.timestamp,
       runMode: retryPair.userMessage.runMode,
@@ -2388,7 +2573,7 @@ export async function retryLatestAssistantResponse(
     assistantMessage.streaming = false;
     refreshChatSafely();
 
-    await updateStoredLatestAssistantMessage(conversationKey, {
+    await updateStoredLatestAssistantMessageByConversation(conversationKey, {
       text: assistantMessage.text,
       timestamp: assistantMessage.timestamp,
       runMode: assistantMessage.runMode,
@@ -2509,7 +2694,15 @@ export async function editUserTurnAndRetry(opts: {
   // Delete persisted subsequent turns
   for (const p of subsequentPairs) {
     try {
-      await deleteStoredTurnMessages(conversationKey, p.userTs, p.assistantTs);
+      if (isClaudeConversationKey(conversationKey)) {
+        await deleteClaudeConversationTurnMessages(
+          conversationKey,
+          p.userTs,
+          p.assistantTs,
+        );
+      } else {
+        await deleteStoredTurnMessages(conversationKey, p.userTs, p.assistantTs);
+      }
     } catch (err) {
       ztoolkit.log("LLM: Failed to delete subsequent stored turn", err);
     }
@@ -2599,7 +2792,7 @@ export async function editUserTurnAndRetry(opts: {
 
   // Persist the updated user message
   try {
-    await updateStoredLatestUserMessage(conversationKey, {
+    await updateStoredLatestUserMessageByConversation(conversationKey, {
       text: userMsg.text,
       timestamp: userMsg.timestamp,
       runMode: userMsg.runMode,
@@ -2638,6 +2831,10 @@ export async function editUserTurnAndRetry(opts: {
       resolvedModel,
       resolvedApiBase,
       resolvedApiKey,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       resolvedReasoning,
       resolvedAdvanced,
     );
@@ -2749,7 +2946,7 @@ async function buildAgentRuntimeRequest(
   };
 }
 
-function buildAgentEngineDeps(): AgentEngineDeps {
+function buildAgentEngineDeps(currentItem?: Zotero.Item): AgentEngineDeps {
   return {
     chatHistory,
     agentRunTraceCache,
@@ -2782,10 +2979,17 @@ function buildAgentEngineDeps(): AgentEngineDeps {
     finalizeCancelledAssistantMessage,
     sanitizeText,
     persistConversationMessage,
-    updateStoredLatestUserMessage: updateStoredLatestUserMessage as AgentEngineDeps["updateStoredLatestUserMessage"],
-    updateStoredLatestAssistantMessage: updateStoredLatestAssistantMessage as AgentEngineDeps["updateStoredLatestAssistantMessage"],
+    updateStoredLatestUserMessage:
+      updateStoredLatestUserMessageByConversation as AgentEngineDeps["updateStoredLatestUserMessage"],
+    updateStoredLatestAssistantMessage:
+      updateStoredLatestAssistantMessageByConversation as AgentEngineDeps["updateStoredLatestAssistantMessage"],
     sendChatFallback: sendQuestion,
-    getAgentRuntime,
+    getAgentRuntime: () =>
+      resolveConversationSystemForItem(currentItem) === "claude_code"
+        ? (getClaudeBridgeRuntime(
+            getCoreAgentRuntime(),
+          ) as unknown as ReturnType<typeof getCoreAgentRuntime>)
+        : getCoreAgentRuntime(),
     maxSelectedImages: MAX_SELECTED_IMAGES,
   };
 }
@@ -2803,10 +3007,27 @@ async function retryLatestAgentResponse(
   model?: string,
   apiBase?: string,
   apiKey?: string,
+  authMode?: "api_key" | "codex_auth" | "copilot_auth" | "webchat",
+  providerProtocol?: ProviderProtocol,
+  modelEntryId?: string,
+  modelProviderLabel?: string,
   reasoning?: LLMReasoningConfig,
   advanced?: AdvancedModelParams,
 ): Promise<void> {
-  await retryAgentTurn(body, item, model, apiBase, apiKey, reasoning, advanced, buildAgentEngineDeps());
+  await retryAgentTurn(
+    body,
+    item,
+    model,
+    apiBase,
+    apiKey,
+    authMode,
+    providerProtocol,
+    modelEntryId,
+    modelProviderLabel,
+    reasoning,
+    advanced,
+    buildAgentEngineDeps(item),
+  );
 }
 
 async function sendAgentQuestion(opts: {
@@ -2817,6 +3038,10 @@ async function sendAgentQuestion(opts: {
   model?: string;
   apiBase?: string;
   apiKey?: string;
+  authMode?: "api_key" | "codex_auth" | "copilot_auth" | "webchat";
+  providerProtocol?: ProviderProtocol;
+  modelEntryId?: string;
+  modelProviderLabel?: string;
   reasoning?: LLMReasoningConfig;
   advanced?: AdvancedModelParams;
   displayQuestion?: string;
@@ -2830,7 +3055,7 @@ async function sendAgentQuestion(opts: {
   pdfModePaperKeys?: Set<string>;
   pdfUploadSystemMessages?: string[];
 }): Promise<void> {
-  await sendAgentTurn(opts, buildAgentEngineDeps());
+  await sendAgentTurn(opts, buildAgentEngineDeps(opts.item));
 }
 
 export async function sendQuestion(opts: import("./types").SendQuestionOptions) {
@@ -2842,10 +3067,29 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
   } = opts;
   if (runtimeMode === "agent" && !skipAgentDispatch) {
     await sendAgentQuestion({
-      body, item, question, images, model, apiBase, apiKey, reasoning, advanced,
-      displayQuestion, selectedTexts, selectedTextSources, selectedTextPaperContexts,
-      selectedTextNoteContexts, paperContexts, fullTextPaperContexts, attachments,
-      pdfModePaperKeys, pdfUploadSystemMessages: opts.pdfUploadSystemMessages,
+      body,
+      item,
+      question,
+      images,
+      model,
+      apiBase,
+      apiKey,
+      authMode: opts.authMode,
+      providerProtocol: opts.providerProtocol,
+      modelEntryId: opts.modelEntryId,
+      modelProviderLabel: opts.modelProviderLabel,
+      reasoning,
+      advanced,
+      displayQuestion,
+      selectedTexts,
+      selectedTextSources,
+      selectedTextPaperContexts,
+      selectedTextNoteContexts,
+      paperContexts,
+      fullTextPaperContexts,
+      attachments,
+      pdfModePaperKeys,
+      pdfUploadSystemMessages: opts.pdfUploadSystemMessages,
     });
     return;
   }
@@ -2982,6 +3226,8 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
     modelEntryId: effectiveRequestConfig.modelEntryId,
     modelProviderLabel: effectiveRequestConfig.modelProviderLabel,
     streaming: true,
+    waitingAnimationStartedAt:
+      effectiveRequestConfig.modelProviderLabel === "Claude Code" ? Date.now() : undefined,
     reasoningOpen: isReasoningExpandedByDefault(),
   };
   history.push(assistantMessage);
@@ -3171,7 +3417,7 @@ export async function sendQuestion(opts: import("./types").SendQuestionOptions) 
       contextPlan.fullTextPaperContexts.length
         ? contextPlan.fullTextPaperContexts
       : undefined;
-    await updateStoredLatestUserMessage(conversationKey, {
+    await updateStoredLatestUserMessageByConversation(conversationKey, {
       text: userMessage.text,
       timestamp: userMessage.timestamp,
       runMode: userMessage.runMode,
@@ -4362,8 +4608,21 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
       if (!hasAnswerText) {
         const typing = doc.createElement("div") as HTMLDivElement;
         typing.className = "llm-typing";
-        typing.innerHTML =
-          '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
+        if (msg.streaming && msg.modelProviderLabel === "Claude Code") {
+          const roseLoader = doc.createElement("span") as HTMLSpanElement;
+          roseLoader.className = "llm-rose-loader";
+          mountClaudeRoseThreeLoader(
+            roseLoader,
+            msg.waitingAnimationStartedAt || msg.timestamp || Date.now(),
+          );
+          const typingText = doc.createElement("span") as HTMLSpanElement;
+          typingText.className = "llm-typing-text";
+          typingText.textContent = "Claude is preparing the final response… ( •̀ᴗ•́ )✧";
+          typing.append(roseLoader, typingText);
+        } else {
+          typing.innerHTML =
+            '<span class="llm-typing-dot"></span><span class="llm-typing-dot"></span><span class="llm-typing-dot"></span>';
+        }
         bubble.appendChild(typing);
       }
     }

@@ -68,6 +68,20 @@ import {
 } from "../utils/obsidianConfig";
 import { testMineruConnection } from "../utils/mineruClient";
 import { registerMineruManagerScript } from "./mineruManagerScript";
+import {
+  getClaudeBridgeUrl,
+  getClaudeConfigSourcePref,
+  getClaudePermissionModePref,
+  getClaudeReasoningModePref,
+  getClaudeRuntimeModelPref,
+  isClaudeCodeModeEnabled,
+  setClaudeBridgeUrl,
+  setClaudeCodeModeEnabled,
+  setConversationSystemPref,
+  setClaudePermissionModePref,
+  setClaudeReasoningModePref,
+  setClaudeRuntimeModelPref,
+} from "../claudeCode/prefs";
 
 type PrefKey = "systemPrompt";
 
@@ -126,6 +140,19 @@ function getProviderProfile(index: number): ProviderProfile {
     defaultModel: "",
   };
 }
+
+type AgentBackendMode = "disabled" | "claude_bridge";
+type AgentPermissionMode = "safe" | "yolo";
+
+function normalizeAgentBackendMode(value: unknown): AgentBackendMode {
+  return value === "claude_bridge" ? "claude_bridge" : "disabled";
+}
+
+function normalizeAgentPermissionMode(value: unknown): AgentPermissionMode {
+  return value === "yolo" ? "yolo" : "safe";
+}
+
+const DEFAULT_AGENT_BRIDGE_URL = "http://127.0.0.1:19787";
 
 function normalizeProviderPresetId(value: unknown): ProviderPresetId {
   if (typeof value !== "string") return "customized";
@@ -323,7 +350,7 @@ function resolveCodexAuthPath(): string {
 async function readCodexAccessToken(): Promise<string> {
   const authPath = resolveCodexAuthPath();
   const io = ztoolkit.getGlobal("IOUtils") as
-    | { read?: (path: string) => Promise<Uint8Array | ArrayBuffer> }
+    | { read?: (path: string) => Promise<Uint8Array<ArrayBufferLike> | ArrayBuffer> }
     | undefined;
   if (!io?.read) {
     throw new Error("IOUtils is unavailable; cannot read Codex auth file");
@@ -341,51 +368,6 @@ async function readCodexAccessToken(): Promise<string> {
     );
   }
   return token;
-}
-
-function extractTextFromCodexSSE(raw: string): string {
-  const lines = raw.split(/\r?\n/);
-  let out = "";
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) continue;
-    const payload = trimmed.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    try {
-      const parsed = JSON.parse(payload) as {
-        type?: string;
-        delta?: string;
-        response?: {
-          output_text?: string;
-          output?: Array<{
-            content?: Array<{ type?: string; text?: string }>;
-          }>;
-        };
-      };
-      if (typeof parsed.delta === "string") {
-        out += parsed.delta;
-      }
-      const completedText = parsed.response?.output_text;
-      if (typeof completedText === "string" && completedText.trim()) {
-        out += completedText;
-      }
-      const outputItems = parsed.response?.output || [];
-      for (const item of outputItems) {
-        const content = item.content || [];
-        for (const part of content) {
-          if (
-            (part.type === "output_text" || part.type === "text") &&
-            typeof part.text === "string"
-          ) {
-            out += part.text;
-          }
-        }
-      }
-    } catch (_err) {
-      continue;
-    }
-  }
-  return out.trim();
 }
 
 // ── Style tokens ───────────────────────────────────────────────────
@@ -1782,6 +1764,31 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
 
+  const agentBackendModeSelect = doc.querySelector(
+    `#${config.addonRef}-agent-backend-mode`,
+  ) as HTMLSelectElement | null;
+  const agentBridgeSettingsWrap = doc.querySelector(
+    `#${config.addonRef}-agent-bridge-settings`,
+  ) as HTMLDivElement | null;
+  const agentBridgeUrlInput = doc.querySelector(
+    `#${config.addonRef}-agent-bridge-url`,
+  ) as HTMLInputElement | null;
+  const agentClaudeConfigSourceSelect = doc.querySelector(
+    `#${config.addonRef}-agent-claude-config-source`,
+  ) as HTMLSelectElement | null;
+  const agentPermissionModeSelect = doc.querySelector(
+    `#${config.addonRef}-agent-permission-mode`,
+  ) as HTMLSelectElement | null;
+  const claudeConfigPathsWrap = doc.querySelector(
+    `#${config.addonRef}-claude-config-paths`,
+  ) as HTMLDivElement | null;
+  const claudeCodeModelSelect = doc.querySelector(
+    `#${config.addonRef}-claude-code-model`,
+  ) as HTMLSelectElement | null;
+  const claudeCodeReasoningSelect = doc.querySelector(
+    `#${config.addonRef}-claude-code-reasoning`,
+  ) as HTMLSelectElement | null;
+
   if (enableAgentModeInput) {
     const prefValue = Zotero.Prefs.get(
       `${config.prefsPrefix}.enableAgentMode`,
@@ -1795,6 +1802,224 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         enableAgentModeInput.checked,
         true,
       );
+    });
+  }
+
+  if (agentBackendModeSelect) {
+    const key = `${config.prefsPrefix}.agentBackendMode`;
+    agentBackendModeSelect.value = isClaudeCodeModeEnabled()
+      ? "claude_bridge"
+      : "disabled";
+    const syncAgentBackendUi = () => {
+      const enabled = normalizeAgentBackendMode(agentBackendModeSelect.value) === "claude_bridge";
+      agentBackendModeSelect.value = enabled ? "claude_bridge" : "disabled";
+      setClaudeCodeModeEnabled(enabled);
+      Zotero.Prefs.set(key, enabled ? "claude_bridge" : "disabled", true);
+      if (!enabled) {
+        setConversationSystemPref("upstream");
+      }
+      if (agentBridgeSettingsWrap) {
+        agentBridgeSettingsWrap.style.display = enabled ? "flex" : "none";
+      }
+    };
+    syncAgentBackendUi();
+    agentBackendModeSelect.addEventListener("change", () => {
+      syncAgentBackendUi();
+    });
+  }
+
+  if (agentBridgeUrlInput) {
+    agentBridgeUrlInput.value = getClaudeBridgeUrl() || DEFAULT_AGENT_BRIDGE_URL;
+    agentBridgeUrlInput.addEventListener("input", () => {
+      setClaudeBridgeUrl(agentBridgeUrlInput.value);
+    });
+  }
+
+  const ensureDirectory = async (dirPath: string) => {
+    const IOUtils = (globalThis as any).IOUtils as
+      | {
+          exists?: (path: string) => Promise<boolean>;
+          makeDirectory?: (
+            path: string,
+            options?: { ignoreExisting?: boolean; createAncestors?: boolean },
+          ) => Promise<void>;
+        }
+      | undefined;
+    if (IOUtils?.exists && IOUtils?.makeDirectory) {
+      const exists = await IOUtils.exists(dirPath);
+      if (!exists) {
+        await IOUtils.makeDirectory(dirPath, {
+          ignoreExisting: true,
+          createAncestors: true,
+        });
+      }
+    }
+  };
+
+  const openDirectory = async (dirPath: string) => {
+    await ensureDirectory(dirPath);
+    try {
+      const Cc = (
+        globalThis as unknown as { Components?: { classes?: Record<string, { createInstance?: (iface: unknown) => unknown }>; interfaces?: Record<string, unknown> } }
+      ).Components?.classes;
+      const Ci = (
+        globalThis as unknown as { Components?: { interfaces?: Record<string, unknown> } }
+      ).Components?.interfaces;
+      if (Cc && Ci && typeof Cc["@mozilla.org/file/local;1"]?.createInstance === "function") {
+        const f = Cc["@mozilla.org/file/local;1"].createInstance(
+          Ci.nsIFile as unknown,
+        ) as
+          | { initWithPath?: (p: string) => void; reveal?: () => void }
+          | undefined;
+        if (f?.initWithPath) {
+          f.initWithPath(dirPath);
+          f.reveal?.();
+          return;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      (Zotero as unknown as { launchFile?: (p: string) => void }).launchFile?.(dirPath);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const renderClaudeConfigPaths = () => {
+    if (!claudeConfigPathsWrap) return;
+    claudeConfigPathsWrap.replaceChildren();
+    const env = getProcess()?.env;
+    const home =
+      env?.HOME?.trim() ||
+      env?.USERPROFILE?.trim() ||
+      getPathUtils()?.homeDir?.trim() ||
+      getOS()?.Constants?.Path?.homeDir?.trim() ||
+      getServices()?.dirsvc?.get?.("Home", getNsIFile())?.path?.trim() ||
+      (Zotero as unknown as { Profile?: { dir?: string } }).Profile?.dir?.trim() ||
+      "";
+    const zoteroWithProfile = Zotero as unknown as { Profile?: { dir?: string } };
+    const profileDir = zoteroWithProfile.Profile?.dir || "";
+    const runtimeRoot = profileDir
+      ? joinLocalPath(profileDir, "agent-runtime")
+      : joinLocalPath(home || ".", "Zotero", "agent-runtime");
+    const projectClaudeDir = joinLocalPath(runtimeRoot, ".claude");
+    const localScopesDir = joinLocalPath(runtimeRoot, "scopes");
+    const localConversationDir = joinLocalPath(
+      runtimeRoot,
+      "scopes",
+      "<scope>",
+      "<scope-id>",
+      "conversations",
+      "<conversation-key>",
+      ".claude",
+    );
+    const rows = [
+      {
+        label: "User",
+        path: home ? joinLocalPath(home, ".claude") : "~/.claude",
+        openPath: home ? joinLocalPath(home, ".claude") : "~/.claude",
+        description: "Global defaults shared across Claude Code on this machine.",
+      },
+      {
+        label: "Project",
+        path: projectClaudeDir,
+        openPath: projectClaudeDir,
+        description: "Shared settings for all Claude runtimes launched by Zotero.",
+      },
+      {
+        label: "Local",
+        path: localConversationDir,
+        openPath: localScopesDir,
+        description: "Each conversation stores its own override folder under the scopes tree.",
+      },
+    ];
+    for (const row of rows) {
+      const wrap = el(
+        doc,
+        "div",
+        "display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 10px; border:1px solid var(--stroke-secondary, #c8c8c8); border-radius:8px; background: rgba(255,255,255,0.02);",
+      );
+      const textWrap = el(
+        doc,
+        "div",
+        "display:flex; flex-direction:column; gap:2px; min-width:0;",
+      );
+      const label = el(
+        doc,
+        "div",
+        "font-size:11px; font-weight:600; color: var(--fill-secondary, #666);",
+        row.label,
+      );
+      const description = el(
+        doc,
+        "div",
+        "font-size:10.5px; color: var(--fill-secondary, #666);",
+        row.description,
+      );
+      const path = el(
+        doc,
+        "div",
+        "font-size:11px; color: var(--fill-secondary, #666); word-break: break-all;",
+        row.path,
+      );
+      const openBtn = el(
+        doc,
+        "button",
+        "padding:4px 10px; font-size:11px; border:1px solid var(--stroke-secondary, #c8c8c8); border-radius:6px; background: Field; color: FieldText; cursor:pointer; flex:0 0 auto;",
+        "Open folder",
+      ) as HTMLButtonElement;
+      openBtn.type = "button";
+      openBtn.addEventListener("click", () => {
+        void openDirectory(row.openPath || row.path);
+      });
+      textWrap.append(label, description, path);
+      wrap.append(textWrap, openBtn);
+      claudeConfigPathsWrap.appendChild(wrap);
+    }
+  };
+
+  if (agentClaudeConfigSourceSelect) {
+    agentClaudeConfigSourceSelect.value = getClaudeConfigSourcePref();
+    agentClaudeConfigSourceSelect.addEventListener("change", () => {
+      const next =
+        agentClaudeConfigSourceSelect.value === "user-only" ||
+        agentClaudeConfigSourceSelect.value === "zotero-only"
+          ? agentClaudeConfigSourceSelect.value
+          : "default";
+      Zotero.Prefs.set(`${config.prefsPrefix}.agentClaudeConfigSource`, next, true);
+      renderClaudeConfigPaths();
+    });
+  }
+  renderClaudeConfigPaths();
+
+  if (agentPermissionModeSelect) {
+    agentPermissionModeSelect.value = getClaudePermissionModePref();
+    agentPermissionModeSelect.addEventListener("change", () => {
+      setClaudePermissionModePref(
+        normalizeAgentPermissionMode(agentPermissionModeSelect.value),
+      );
+    });
+  }
+
+  if (claudeCodeModelSelect) {
+    claudeCodeModelSelect.value = getClaudeRuntimeModelPref();
+    claudeCodeModelSelect.addEventListener("change", () => {
+      setClaudeRuntimeModelPref(claudeCodeModelSelect.value);
+    });
+  }
+
+  if (claudeCodeReasoningSelect) {
+    claudeCodeReasoningSelect.value = getClaudeReasoningModePref();
+    claudeCodeReasoningSelect.addEventListener("change", () => {
+      const next =
+        claudeCodeReasoningSelect.value === "low" ||
+        claudeCodeReasoningSelect.value === "medium" ||
+        claudeCodeReasoningSelect.value === "high"
+          ? claudeCodeReasoningSelect.value
+          : "auto";
+      setClaudeReasoningModePref(next);
     });
   }
 

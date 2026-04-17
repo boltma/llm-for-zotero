@@ -5,9 +5,41 @@ import {
 import { normalizePositiveInt } from "./normalizers";
 import {
   getLastUsedPaperConversationKey,
+  getLockedGlobalConversationKey,
 } from "./prefHelpers";
-import { activePaperConversationByPaper } from "./state";
-import type { ActiveNoteSession, GlobalPortalItem, PaperPortalItem } from "./types";
+import {
+  activeConversationModeByLibrary,
+  activeGlobalConversationByLibrary,
+  activePaperConversationByPaper,
+} from "./state";
+import type {
+  ActiveNoteSession,
+  GlobalPortalItem,
+  PaperPortalItem,
+} from "./types";
+import type { ConversationSystem } from "../../shared/types";
+import {
+  buildDefaultClaudeGlobalConversationKey,
+  buildDefaultClaudePaperConversationKey,
+} from "../../claudeCode/constants";
+import {
+  createClaudeGlobalPortalItem,
+  createClaudePaperPortalItem,
+  isClaudeGlobalPortalItem,
+  isClaudePaperPortalItem,
+  resolveClaudePaperPortalBaseItem,
+} from "../../claudeCode/portal";
+import {
+  getConversationSystemPref,
+  getLastUsedClaudeGlobalConversationKey,
+  getLastUsedClaudePaperConversationKey,
+} from "../../claudeCode/prefs";
+import {
+  activeClaudeConversationModeByLibrary,
+  activeClaudeGlobalConversationByLibrary,
+  activeClaudePaperConversationByPaper,
+  buildClaudePaperStateKey,
+} from "../../claudeCode/state";
 
 export function resolveActiveLibraryID(): number | null {
   try {
@@ -268,16 +300,23 @@ export function resolveDisplayConversationKind(
     return noteSession.displayConversationKind;
   }
   if (!item) return null;
-  return isGlobalPortalItem(item) ? "global" : "paper";
+  return isGlobalPortalItem(item) || isClaudeGlobalPortalItem(item)
+    ? "global"
+    : "paper";
 }
 
 export function resolveConversationBaseItem(
   targetItem: Zotero.Item | null | undefined,
 ): Zotero.Item | null {
   if (!targetItem) return null;
-  if (isGlobalPortalItem(targetItem)) return null;
+  if (isGlobalPortalItem(targetItem) || isClaudeGlobalPortalItem(targetItem)) {
+    return null;
+  }
   if (isPaperPortalItem(targetItem)) {
     return resolvePaperPortalBaseItem(targetItem);
+  }
+  if (isClaudePaperPortalItem(targetItem)) {
+    return resolveClaudePaperPortalBaseItem(targetItem);
   }
   const noteParentItem = resolveNoteParentItem(targetItem);
   if (noteParentItem) {
@@ -305,8 +344,71 @@ function resolveLibraryIdFromItem(
   return resolveActiveLibraryID() || 0;
 }
 
+export function resolveConversationSystemForItem(
+  item: Zotero.Item | null | undefined,
+): ConversationSystem | null {
+  if (isClaudeGlobalPortalItem(item) || isClaudePaperPortalItem(item)) {
+    return "claude_code";
+  }
+  if (isGlobalPortalItem(item) || isPaperPortalItem(item)) {
+    return "upstream";
+  }
+  return null;
+}
+
+function resolvePreferredConversationSystem(params: {
+  item: Zotero.Item | null | undefined;
+  preferredSystem?: ConversationSystem | null;
+}): ConversationSystem {
+  return (
+    resolveConversationSystemForItem(params.item) ||
+    params.preferredSystem ||
+    getConversationSystemPref()
+  );
+}
+
+function resolvePreferredConversationMode(
+  libraryID: number,
+  system: ConversationSystem,
+): "global" | "paper" {
+  if (system === "claude_code") {
+    const rememberedMode = activeClaudeConversationModeByLibrary.get(libraryID);
+    return rememberedMode === "global" ? "global" : "paper";
+  }
+  if (getLockedGlobalConversationKey(libraryID) !== null) {
+    return "global";
+  }
+  const rememberedMode = activeConversationModeByLibrary.get(libraryID);
+  return rememberedMode === "global" ? "global" : "paper";
+}
+
+function resolveGlobalConversationKey(
+  libraryID: number,
+  system: ConversationSystem,
+): number {
+  if (system === "claude_code") {
+    return Math.floor(
+      Number(
+        activeClaudeGlobalConversationByLibrary.get(libraryID) ||
+          getLastUsedClaudeGlobalConversationKey(libraryID) ||
+          buildDefaultClaudeGlobalConversationKey(libraryID),
+      ),
+    );
+  }
+  return Math.floor(
+    Number(
+      getLockedGlobalConversationKey(libraryID) ||
+        activeGlobalConversationByLibrary.get(libraryID) ||
+        GLOBAL_CONVERSATION_KEY_BASE,
+    ),
+  );
+}
+
 export function resolveInitialPanelItemState(
   initialItem: Zotero.Item | null | undefined,
+  options?: {
+    conversationSystem?: ConversationSystem | null;
+  },
 ): {
   item: Zotero.Item | null;
   basePaperItem: Zotero.Item | null;
@@ -327,30 +429,57 @@ export function resolveInitialPanelItemState(
     return { item, basePaperItem: null };
   }
 
-  const libraryID = resolveLibraryIdFromItem(basePaperItem);
+  if (isPaperPortalItem(item) || isClaudePaperPortalItem(item)) {
+    return { item, basePaperItem };
+  }
 
-  // Sidepanels always resolve to paper mode. Open chat lives only in
-  // the standalone window, which constructs its own global portal item
-  // directly in openStandaloneChat().
+  const libraryID = resolveLibraryIdFromItem(basePaperItem);
+  const conversationSystem = resolvePreferredConversationSystem({
+    item,
+    preferredSystem: options?.conversationSystem,
+  });
+  const preferredMode = resolvePreferredConversationMode(
+    libraryID,
+    conversationSystem,
+  );
+
+  if (preferredMode === "global") {
+    const conversationKey = resolveGlobalConversationKey(
+      libraryID,
+      conversationSystem,
+    );
+    item = conversationSystem === "claude_code"
+      ? createClaudeGlobalPortalItem(libraryID, conversationKey)
+      : createGlobalPortalItem(libraryID, conversationKey);
+    return { item, basePaperItem };
+  }
 
   const paperItemID = Number(basePaperItem.id || 0);
   const rememberedPaperKey = Number(
-    activePaperConversationByPaper.get(
-      buildPaperStateKey(libraryID, paperItemID),
-    ) ||
-      getLastUsedPaperConversationKey(libraryID, paperItemID) ||
-      0,
+    conversationSystem === "claude_code"
+      ? activeClaudePaperConversationByPaper.get(
+          buildClaudePaperStateKey(libraryID, paperItemID),
+        ) ||
+          getLastUsedClaudePaperConversationKey(libraryID, paperItemID) ||
+          buildDefaultClaudePaperConversationKey(paperItemID)
+      : activePaperConversationByPaper.get(
+          buildPaperStateKey(libraryID, paperItemID),
+        ) ||
+          getLastUsedPaperConversationKey(libraryID, paperItemID) ||
+          0,
   );
   if (
     Number.isFinite(rememberedPaperKey) &&
     rememberedPaperKey > 0 &&
     Math.floor(rememberedPaperKey) !== paperItemID
   ) {
-    item = createPaperPortalItem(
-      basePaperItem,
-      Math.floor(rememberedPaperKey),
-      0,
-    );
+    item = conversationSystem === "claude_code"
+      ? createClaudePaperPortalItem(basePaperItem, Math.floor(rememberedPaperKey))
+      : createPaperPortalItem(
+          basePaperItem,
+          Math.floor(rememberedPaperKey),
+          0,
+        );
   }
 
   return { item, basePaperItem };

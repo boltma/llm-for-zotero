@@ -12,14 +12,24 @@ import { initConversationMemoryStore } from "./store/conversationMemory";
 import { createAgentModelAdapter } from "./model/factory";
 import { createBuiltInActionRegistry, type ActionRegistry } from "./actions";
 import { registerMcpServer, unregisterMcpServer } from "./mcp/server";
+import {
+  createExternalBackendBridgeRuntime,
+  type AgentRuntimeLike,
+} from "./externalBackendBridge";
 import type {
   AgentConfirmationResolution,
   AgentEvent,
   AgentRuntimeRequest,
   AgentToolDefinition,
 } from "./types";
+import {
+  getClaudeBridgeUrl,
+  getConversationSystemPref,
+} from "../claudeCode/prefs";
+import { getClaudeCommandCatalog } from "../claudeCode/commandCatalog";
 
 let runtime: AgentRuntime | null = null;
+let runtimeBridge: AgentRuntimeLike | null = null;
 let _actionRegistry: ActionRegistry | null = null;
 let _toolRegistry: ReturnType<typeof createBuiltInToolRegistry> | null = null;
 
@@ -57,6 +67,12 @@ export async function initAgentSubsystem(): Promise<AgentRuntime> {
     zoteroGateway: _zoteroGateway!,
   });
 
+  runtimeBridge = createExternalBackendBridgeRuntime({
+    coreRuntime: runtime,
+    getBridgeUrl: () =>
+      getConversationSystemPref() === "claude_code" ? getClaudeBridgeUrl() : "",
+  });
+
   return runtime;
 }
 
@@ -64,15 +80,23 @@ export function shutdownAgentSubsystem(): void {
   unregisterMcpServer();
   _actionRegistry = null;
   _toolRegistry = null;
+  runtimeBridge = null;
   runtime = null;
   _zoteroGateway = null;
 }
 
-export function getAgentRuntime(): AgentRuntime {
+export function getCoreAgentRuntime(): AgentRuntime {
   if (!runtime) {
     throw new Error("Agent subsystem is not initialized");
   }
   return runtime;
+}
+
+export function getAgentRuntime(): AgentRuntime {
+  if (getConversationSystemPref() === "claude_code" && runtimeBridge) {
+    return runtimeBridge as unknown as AgentRuntime;
+  }
+  return getCoreAgentRuntime();
 }
 
 /**
@@ -114,6 +138,7 @@ export function getAgentApi() {
       requestId: string,
       resolve: (resolution: AgentConfirmationResolution) => void,
     ) => getAgentRuntime().registerPendingConfirmation(requestId, resolve),
+    listSlashCommands: () => getClaudeCommandCatalog(getCoreAgentRuntime()),
 
     // ── Extension API ──────────────────────────────────────────────────────
     /**

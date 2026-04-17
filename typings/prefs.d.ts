@@ -27,6 +27,14 @@ declare namespace _ZoteroTypes {
       "temperatureQuaternary": string;
       "maxTokensQuaternary": string;
       "enableAgentMode": boolean;
+      "agentBackendMode": string;
+      "enableClaudeCodeMode": boolean;
+      "agentBackendBridgeUrl": string;
+      "agentClaudeConfigSource": string;
+      "agentPermissionMode": string;
+      "conversationSystem": string;
+      "claudeCodeModel": string;
+      "claudeCodeReasoning": string;
       "obsidianVaultPath": string;
       "obsidianTargetFolder": string;
       "obsidianAttachmentsFolder": string;

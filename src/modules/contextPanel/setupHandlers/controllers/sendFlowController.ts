@@ -4,7 +4,6 @@ import type {
   AdvancedModelParams,
   ChatAttachment,
   ChatRuntimeMode,
-  NoteContextRef,
   PaperContextRef,
   SelectedTextContext,
 } from "../../types";
@@ -63,11 +62,11 @@ type SendFlowControllerDeps = {
   uploadPdfForProvider: (params: {
     apiBase: string;
     apiKey: string;
-    pdfBytes: Uint8Array;
+    pdfBytes: Uint8Array<ArrayBufferLike>;
     fileName: string;
   }) => Promise<{ systemMessageContent: string; label: string } | null>;
-  resolvePdfBytes: (paperContext: PaperContextRef) => Promise<Uint8Array>;
-  encodeBytesBase64: (bytes: Uint8Array) => string;
+  resolvePdfBytes: (paperContext: PaperContextRef) => Promise<Uint8Array<ArrayBufferLike>>;
+  encodeBytesBase64: (bytes: Uint8Array<ArrayBufferLike>) => string;
   getSelectedFiles: (itemId: number) => ChatAttachment[];
   getSelectedImages: (itemId: number) => string[];
   resolvePromptText: (
@@ -90,8 +89,13 @@ type SendFlowControllerDeps = {
   ) => string;
   isAgentMode: () => boolean;
   isGlobalMode: () => boolean;
+  isClaudeConversationSystem: () => boolean;
   normalizeConversationTitleSeed: (raw: unknown) => string;
   getConversationKey: (item: Zotero.Item) => number;
+  touchClaudeConversationTitle: (
+    conversationKey: number,
+    title: string,
+  ) => Promise<void>;
   touchGlobalConversationTitle: (
     conversationKey: number,
     title: string,
@@ -337,22 +341,14 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       deps.normalizeConversationTitleSeed(text) ||
       deps.normalizeConversationTitleSeed(resolvedPromptText);
     if (titleSeed) {
-      if (deps.isGlobalMode()) {
-        void deps
-          .touchGlobalConversationTitle(
-            deps.getConversationKey(item),
-            titleSeed,
-          )
-          .catch((err) => {
-            ztoolkit.log("LLM: Failed to touch global conversation title", err);
-          });
-      } else {
-        void deps
-          .touchPaperConversationTitle(deps.getConversationKey(item), titleSeed)
-          .catch((err) => {
-            ztoolkit.log("LLM: Failed to touch paper conversation title", err);
-          });
-      }
+      const touchTitle = deps.isClaudeConversationSystem()
+        ? deps.touchClaudeConversationTitle
+        : deps.isGlobalMode()
+          ? deps.touchGlobalConversationTitle
+          : deps.touchPaperConversationTitle;
+      void touchTitle(deps.getConversationKey(item), titleSeed).catch((err) => {
+        ztoolkit.log("LLM: Failed to touch conversation title", err);
+      });
     }
 
     const selectedProfile = deps.getSelectedProfile();
@@ -411,6 +407,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         model: selectedProfile?.model,
         apiBase: selectedProfile?.apiBase,
         apiKey: selectedProfile?.apiKey,
+        authMode: selectedProfile?.authMode,
+        providerProtocol: selectedProfile?.providerProtocol,
+        modelEntryId: selectedProfile?.entryId,
+        modelProviderLabel: selectedProfile?.providerLabel,
         reasoning: selectedReasoning,
         advanced: advancedParams,
       });
@@ -485,6 +485,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       model: selectedProfile?.model,
       apiBase: selectedProfile?.apiBase,
       apiKey: selectedProfile?.apiKey,
+      authMode: selectedProfile?.authMode,
+      providerProtocol: selectedProfile?.providerProtocol,
+      modelEntryId: selectedProfile?.entryId,
+      modelProviderLabel: selectedProfile?.providerLabel,
       reasoning: selectedReasoning,
       advanced: advancedParams,
       displayQuestion,

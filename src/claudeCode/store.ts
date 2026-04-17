@@ -1,0 +1,1068 @@
+declare const Zotero: any;
+
+import type {
+  ClaudeConversationSummary,
+  ClaudeConversationKind,
+  NoteContextRef,
+  SelectedTextSource,
+} from "../shared/types";
+import {
+  normalizeSelectedTextNoteContexts,
+  normalizeSelectedTextPaperContexts,
+  normalizeSelectedTextSource,
+  normalizePaperContextRefs,
+} from "../modules/contextPanel/normalizers";
+import type { StoredChatMessage } from "../utils/chatStore";
+import {
+  CLAUDE_GLOBAL_CONVERSATION_KEY_BASE,
+  CLAUDE_HISTORY_LIMIT,
+  CLAUDE_PAPER_CONVERSATION_KEY_BASE,
+  buildDefaultClaudeGlobalConversationKey,
+  buildDefaultClaudePaperConversationKey,
+} from "./constants";
+
+const CLAUDE_MESSAGES_TABLE = "llm_for_zotero_claude_messages";
+const CLAUDE_MESSAGES_INDEX = "llm_for_zotero_claude_messages_conversation_idx";
+const CLAUDE_CONVERSATIONS_TABLE = "llm_for_zotero_claude_conversations";
+const CLAUDE_CONVERSATIONS_KIND_INDEX =
+  "llm_for_zotero_claude_conversations_kind_idx";
+
+function normalizeConversationKey(conversationKey: number): number | null {
+  if (!Number.isFinite(conversationKey)) return null;
+  const normalized = Math.floor(conversationKey);
+  return normalized > 0 ? normalized : null;
+}
+
+function normalizeLibraryID(libraryID: number): number | null {
+  if (!Number.isFinite(libraryID)) return null;
+  const normalized = Math.floor(libraryID);
+  return normalized > 0 ? normalized : null;
+}
+
+function normalizePaperItemID(paperItemID: number): number | null {
+  if (!Number.isFinite(paperItemID)) return null;
+  const normalized = Math.floor(paperItemID);
+  return normalized > 0 ? normalized : null;
+}
+
+function normalizeLimit(limit: number, fallback: number): number {
+  if (!Number.isFinite(limit)) return fallback;
+  return Math.max(1, Math.floor(limit));
+}
+
+function normalizeConversationTitleSeed(value: string): string {
+  if (typeof value !== "string") return "";
+  const normalized = value
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+  return normalized.slice(0, 96);
+}
+
+function normalizeCatalogTimestamp(value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return Date.now();
+  return Math.floor(parsed);
+}
+
+export async function initClaudeCodeStore(): Promise<void> {
+  await Zotero.DB.executeTransaction(async () => {
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${CLAUDE_MESSAGES_TABLE} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_key INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        text TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        run_mode TEXT CHECK(run_mode IN ('chat', 'agent')),
+        agent_run_id TEXT,
+        selected_text TEXT,
+        selected_texts_json TEXT,
+        selected_text_sources_json TEXT,
+        selected_text_paper_contexts_json TEXT,
+        selected_text_note_contexts_json TEXT,
+        paper_contexts_json TEXT,
+        full_text_paper_contexts_json TEXT,
+        screenshot_images TEXT,
+        attachments_json TEXT,
+        model_name TEXT,
+        model_entry_id TEXT,
+        model_provider_label TEXT,
+        webchat_run_state TEXT,
+        webchat_completion_reason TEXT,
+        reasoning_summary TEXT,
+        reasoning_details TEXT
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS ${CLAUDE_MESSAGES_INDEX}
+       ON ${CLAUDE_MESSAGES_TABLE} (conversation_key, timestamp, id)`,
+    );
+
+    await Zotero.DB.queryAsync(
+      `CREATE TABLE IF NOT EXISTS ${CLAUDE_CONVERSATIONS_TABLE} (
+        conversation_key INTEGER PRIMARY KEY,
+        library_id INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('global', 'paper')),
+        paper_item_id INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        title TEXT,
+        provider_session_id TEXT,
+        scoped_conversation_key TEXT,
+        scope_type TEXT,
+        scope_id TEXT,
+        scope_label TEXT,
+        cwd TEXT,
+        model_name TEXT,
+        effort TEXT
+      )`,
+    );
+    await Zotero.DB.queryAsync(
+      `CREATE INDEX IF NOT EXISTS ${CLAUDE_CONVERSATIONS_KIND_INDEX}
+       ON ${CLAUDE_CONVERSATIONS_TABLE} (library_id, kind, paper_item_id, updated_at DESC, conversation_key DESC)`,
+    );
+  });
+}
+
+function serializeSelectedTextSources(
+  selectedTextSources: SelectedTextSource[] | undefined,
+  count: number,
+): string | null {
+  if (!Array.isArray(selectedTextSources) || count <= 0) return null;
+  const normalized = Array.from({ length: count }, (_, index) =>
+    normalizeSelectedTextSource(selectedTextSources[index]),
+  );
+  return normalized.length ? JSON.stringify(normalized) : null;
+}
+
+export async function appendClaudeMessage(
+  conversationKey: number,
+  message: StoredChatMessage,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+
+  const selectedTexts = Array.isArray(message.selectedTexts)
+    ? message.selectedTexts
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    : typeof message.selectedText === "string" && message.selectedText.trim()
+      ? [message.selectedText.trim()]
+      : [];
+  const selectedTextSources = serializeSelectedTextSources(
+    message.selectedTextSources,
+    selectedTexts.length,
+  );
+  const selectedTextPaperContexts = normalizeSelectedTextPaperContexts(
+    message.selectedTextPaperContexts,
+    selectedTexts.length,
+  );
+  const selectedTextNoteContexts = normalizeSelectedTextNoteContexts(
+    (message as StoredChatMessage & { selectedTextNoteContexts?: (NoteContextRef | undefined)[] })
+      .selectedTextNoteContexts,
+    selectedTexts.length,
+  );
+  const paperContexts = normalizePaperContextRefs(message.paperContexts);
+  const fullTextPaperContexts = normalizePaperContextRefs(
+    message.fullTextPaperContexts,
+  );
+  const screenshotImages = Array.isArray(message.screenshotImages)
+    ? message.screenshotImages.filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+    : [];
+  const attachments = Array.isArray(message.attachments)
+    ? message.attachments.filter(
+        (entry) => entry && typeof entry.id === "string" && entry.id.trim(),
+      )
+    : [];
+
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${CLAUDE_MESSAGES_TABLE}
+      (conversation_key, role, text, timestamp, run_mode, agent_run_id, selected_text, selected_texts_json, selected_text_sources_json, selected_text_paper_contexts_json, selected_text_note_contexts_json, paper_contexts_json, full_text_paper_contexts_json, screenshot_images, attachments_json, model_name, model_entry_id, model_provider_label, webchat_run_state, webchat_completion_reason, reasoning_summary, reasoning_details)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      normalizedKey,
+      message.role,
+      message.text || "",
+      Number.isFinite(message.timestamp) ? Math.floor(message.timestamp) : Date.now(),
+      message.runMode || null,
+      message.agentRunId || null,
+      selectedTexts[0] || message.selectedText || null,
+      selectedTexts.length ? JSON.stringify(selectedTexts) : null,
+      selectedTextSources,
+      selectedTextPaperContexts.some((entry) => Boolean(entry))
+        ? JSON.stringify(selectedTextPaperContexts)
+        : null,
+      selectedTextNoteContexts.some((entry) => Boolean(entry))
+        ? JSON.stringify(selectedTextNoteContexts)
+        : null,
+      paperContexts.length ? JSON.stringify(paperContexts) : null,
+      fullTextPaperContexts.length ? JSON.stringify(fullTextPaperContexts) : null,
+      screenshotImages.length ? JSON.stringify(screenshotImages) : null,
+      attachments.length ? JSON.stringify(attachments) : null,
+      message.modelName || null,
+      message.modelEntryId || null,
+      message.modelProviderLabel || null,
+      message.webchatRunState || null,
+      message.webchatCompletionReason || null,
+      message.reasoningSummary || null,
+      message.reasoningDetails || null,
+    ],
+  );
+}
+
+export async function loadClaudeConversation(
+  conversationKey: number,
+  limit = CLAUDE_HISTORY_LIMIT,
+): Promise<StoredChatMessage[]> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return [];
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT role,
+            text,
+            timestamp,
+            run_mode AS runMode,
+            agent_run_id AS agentRunId,
+            selected_text AS selectedText,
+            selected_texts_json AS selectedTextsJson,
+            selected_text_sources_json AS selectedTextSourcesJson,
+            selected_text_paper_contexts_json AS selectedTextPaperContextsJson,
+            selected_text_note_contexts_json AS selectedTextNoteContextsJson,
+            paper_contexts_json AS paperContextsJson,
+            full_text_paper_contexts_json AS fullTextPaperContextsJson,
+            screenshot_images AS screenshotImages,
+            attachments_json AS attachmentsJson,
+            model_name AS modelName,
+            model_entry_id AS modelEntryId,
+            model_provider_label AS modelProviderLabel,
+            webchat_run_state AS webchatRunState,
+            webchat_completion_reason AS webchatCompletionReason,
+            reasoning_summary AS reasoningSummary,
+            reasoning_details AS reasoningDetails
+     FROM ${CLAUDE_MESSAGES_TABLE}
+     WHERE conversation_key = ?
+     ORDER BY timestamp ASC, id ASC
+     LIMIT ?`,
+    [normalizedKey, normalizeLimit(limit, CLAUDE_HISTORY_LIMIT)],
+  )) as Array<Record<string, unknown>> | undefined;
+  if (!rows?.length) return [];
+
+  const messages: StoredChatMessage[] = [];
+  for (const row of rows) {
+    const role = row.role === "assistant" ? "assistant" : row.role === "user" ? "user" : null;
+    if (!role) continue;
+    const selectedTexts = (() => {
+      if (typeof row.selectedTextsJson !== "string" || !row.selectedTextsJson) {
+        return typeof row.selectedText === "string" && row.selectedText.trim()
+          ? [row.selectedText.trim()]
+          : [];
+      }
+      try {
+        const parsed = JSON.parse(row.selectedTextsJson) as unknown;
+        return Array.isArray(parsed)
+          ? parsed.filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+          : [];
+      } catch {
+        return [];
+      }
+    })();
+    const selectedTextSources = (() => {
+      if (typeof row.selectedTextSourcesJson !== "string" || !row.selectedTextSourcesJson) {
+        return undefined;
+      }
+      try {
+        const parsed = JSON.parse(row.selectedTextSourcesJson) as unknown;
+        return Array.isArray(parsed)
+          ? parsed.map((entry) => normalizeSelectedTextSource(entry))
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const selectedTextPaperContexts = (() => {
+      if (typeof row.selectedTextPaperContextsJson !== "string" || !row.selectedTextPaperContextsJson) {
+        return undefined;
+      }
+      try {
+        const parsed = JSON.parse(row.selectedTextPaperContextsJson) as unknown;
+        const normalized = normalizeSelectedTextPaperContexts(parsed, selectedTexts.length);
+        return normalized.some((entry) => Boolean(entry)) ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const selectedTextNoteContexts = (() => {
+      if (typeof row.selectedTextNoteContextsJson !== "string" || !row.selectedTextNoteContextsJson) {
+        return undefined;
+      }
+      try {
+        const parsed = JSON.parse(row.selectedTextNoteContextsJson) as unknown;
+        const normalized = normalizeSelectedTextNoteContexts(parsed, selectedTexts.length);
+        return normalized.some((entry) => Boolean(entry)) ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const paperContexts = (() => {
+      if (typeof row.paperContextsJson !== "string" || !row.paperContextsJson) return undefined;
+      try {
+        const parsed = JSON.parse(row.paperContextsJson) as unknown;
+        const normalized = normalizePaperContextRefs(parsed);
+        return normalized.length ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const fullTextPaperContexts = (() => {
+      if (typeof row.fullTextPaperContextsJson !== "string" || !row.fullTextPaperContextsJson) return undefined;
+      try {
+        const parsed = JSON.parse(row.fullTextPaperContextsJson) as unknown;
+        const normalized = normalizePaperContextRefs(parsed);
+        return normalized.length ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const screenshotImages = (() => {
+      if (typeof row.screenshotImages !== "string" || !row.screenshotImages) return undefined;
+      try {
+        const parsed = JSON.parse(row.screenshotImages) as unknown;
+        const normalized = Array.isArray(parsed)
+          ? parsed.filter((entry): entry is string => typeof entry === "string" && Boolean(entry.trim()))
+          : [];
+        return normalized.length ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    const attachments = (() => {
+      if (typeof row.attachmentsJson !== "string" || !row.attachmentsJson) return undefined;
+      try {
+        const parsed = JSON.parse(row.attachmentsJson) as unknown;
+        const normalized = Array.isArray(parsed)
+          ? parsed.filter(
+              (entry): entry is NonNullable<StoredChatMessage["attachments"]>[number] =>
+                Boolean(entry) &&
+                typeof entry === "object" &&
+                typeof (entry as { id?: unknown }).id === "string" &&
+                Boolean(String((entry as { id?: string }).id || "").trim()),
+            )
+          : [];
+        return normalized.length ? normalized : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+
+    messages.push({
+      role,
+      text: typeof row.text === "string" ? row.text : "",
+      timestamp: Number.isFinite(Number(row.timestamp)) ? Math.floor(Number(row.timestamp)) : Date.now(),
+      runMode: row.runMode === "agent" ? "agent" : row.runMode === "chat" ? "chat" : undefined,
+      agentRunId: typeof row.agentRunId === "string" ? row.agentRunId : undefined,
+      selectedText: selectedTexts[0],
+      selectedTexts: selectedTexts.length ? selectedTexts : undefined,
+      selectedTextSources,
+      selectedTextPaperContexts,
+      selectedTextNoteContexts,
+      paperContexts,
+      fullTextPaperContexts,
+      screenshotImages,
+      attachments,
+      modelName: typeof row.modelName === "string" ? row.modelName : undefined,
+      modelEntryId: typeof row.modelEntryId === "string" ? row.modelEntryId : undefined,
+      modelProviderLabel:
+        typeof row.modelProviderLabel === "string"
+          ? row.modelProviderLabel
+          : undefined,
+      webchatRunState:
+        row.webchatRunState === "done" ||
+        row.webchatRunState === "incomplete" ||
+        row.webchatRunState === "error"
+          ? row.webchatRunState
+          : undefined,
+      webchatCompletionReason:
+        row.webchatCompletionReason === "settled" ||
+        row.webchatCompletionReason === "forced_cancel" ||
+        row.webchatCompletionReason === "timeout" ||
+        row.webchatCompletionReason === "error"
+          ? row.webchatCompletionReason
+          : null,
+      reasoningSummary:
+        typeof row.reasoningSummary === "string" ? row.reasoningSummary : undefined,
+      reasoningDetails:
+        typeof row.reasoningDetails === "string" ? row.reasoningDetails : undefined,
+    });
+  }
+  return messages;
+}
+
+export async function clearClaudeConversation(conversationKey: number): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${CLAUDE_MESSAGES_TABLE} WHERE conversation_key = ?`,
+    [normalizedKey],
+  );
+}
+
+export async function deleteClaudeTurnMessages(
+  conversationKey: number,
+  userTimestamp: number,
+  assistantTimestamp: number,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  const normalizedUserTimestamp = Number.isFinite(userTimestamp)
+    ? Math.floor(userTimestamp)
+    : 0;
+  const normalizedAssistantTimestamp = Number.isFinite(assistantTimestamp)
+    ? Math.floor(assistantTimestamp)
+    : 0;
+  if (normalizedUserTimestamp <= 0 || normalizedAssistantTimestamp <= 0) return;
+
+  await Zotero.DB.executeTransaction(async () => {
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${CLAUDE_MESSAGES_TABLE}
+       WHERE id = (
+         SELECT id
+         FROM ${CLAUDE_MESSAGES_TABLE}
+         WHERE conversation_key = ?
+           AND role = 'user'
+           AND timestamp = ?
+         ORDER BY id DESC
+         LIMIT 1
+       )`,
+      [normalizedKey, normalizedUserTimestamp],
+    );
+    await Zotero.DB.queryAsync(
+      `DELETE FROM ${CLAUDE_MESSAGES_TABLE}
+       WHERE id = (
+         SELECT id
+         FROM ${CLAUDE_MESSAGES_TABLE}
+         WHERE conversation_key = ?
+           AND role = 'assistant'
+           AND timestamp = ?
+         ORDER BY id DESC
+         LIMIT 1
+       )`,
+      [normalizedKey, normalizedAssistantTimestamp],
+    );
+  });
+}
+
+export async function pruneClaudeConversation(
+  conversationKey: number,
+  keep = CLAUDE_HISTORY_LIMIT,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${CLAUDE_MESSAGES_TABLE}
+     WHERE id IN (
+       SELECT id
+       FROM ${CLAUDE_MESSAGES_TABLE}
+       WHERE conversation_key = ?
+       ORDER BY timestamp DESC, id DESC
+       LIMIT -1 OFFSET ?
+     )`,
+    [normalizedKey, normalizeLimit(keep, CLAUDE_HISTORY_LIMIT)],
+  );
+}
+
+export async function updateLatestClaudeUserMessage(
+  conversationKey: number,
+  message: Pick<
+    StoredChatMessage,
+    | "text"
+    | "timestamp"
+    | "runMode"
+    | "agentRunId"
+    | "selectedText"
+    | "selectedTexts"
+    | "selectedTextSources"
+    | "selectedTextPaperContexts"
+    | "selectedTextNoteContexts"
+    | "paperContexts"
+    | "fullTextPaperContexts"
+    | "screenshotImages"
+    | "attachments"
+  >,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  const selectedTexts = Array.isArray(message.selectedTexts)
+    ? message.selectedTexts
+    : typeof message.selectedText === "string" && message.selectedText.trim()
+      ? [message.selectedText.trim()]
+      : [];
+  const selectedTextPaperContexts = normalizeSelectedTextPaperContexts(
+    message.selectedTextPaperContexts,
+    selectedTexts.length,
+  );
+  const selectedTextNoteContexts = normalizeSelectedTextNoteContexts(
+    message.selectedTextNoteContexts,
+    selectedTexts.length,
+  );
+  await Zotero.DB.queryAsync(
+    `UPDATE ${CLAUDE_MESSAGES_TABLE}
+     SET text = ?,
+         timestamp = ?,
+         run_mode = ?,
+         agent_run_id = ?,
+         selected_text = ?,
+         selected_texts_json = ?,
+         selected_text_sources_json = ?,
+         selected_text_paper_contexts_json = ?,
+         selected_text_note_contexts_json = ?,
+         paper_contexts_json = ?,
+         full_text_paper_contexts_json = ?,
+         screenshot_images = ?,
+         attachments_json = ?
+     WHERE id = (
+       SELECT id
+       FROM ${CLAUDE_MESSAGES_TABLE}
+       WHERE conversation_key = ? AND role = 'user'
+       ORDER BY timestamp DESC, id DESC
+       LIMIT 1
+     )`,
+    [
+      message.text || "",
+      Number.isFinite(message.timestamp) ? Math.floor(message.timestamp) : Date.now(),
+      message.runMode || null,
+      message.agentRunId || null,
+      selectedTexts[0] || null,
+      selectedTexts.length ? JSON.stringify(selectedTexts) : null,
+      serializeSelectedTextSources(message.selectedTextSources, selectedTexts.length),
+      selectedTextPaperContexts.some((entry) => Boolean(entry))
+        ? JSON.stringify(selectedTextPaperContexts)
+        : null,
+      selectedTextNoteContexts.some((entry) => Boolean(entry))
+        ? JSON.stringify(selectedTextNoteContexts)
+        : null,
+      message.paperContexts?.length ? JSON.stringify(normalizePaperContextRefs(message.paperContexts)) : null,
+      message.fullTextPaperContexts?.length
+        ? JSON.stringify(normalizePaperContextRefs(message.fullTextPaperContexts))
+        : null,
+      message.screenshotImages?.length ? JSON.stringify(message.screenshotImages) : null,
+      message.attachments?.length ? JSON.stringify(message.attachments) : null,
+      normalizedKey,
+    ],
+  );
+}
+
+export async function updateLatestClaudeAssistantMessage(
+  conversationKey: number,
+  message: Pick<
+    StoredChatMessage,
+    | "text"
+    | "timestamp"
+    | "runMode"
+    | "agentRunId"
+    | "modelName"
+    | "modelEntryId"
+    | "modelProviderLabel"
+    | "webchatRunState"
+    | "webchatCompletionReason"
+    | "reasoningSummary"
+    | "reasoningDetails"
+  >,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  await Zotero.DB.queryAsync(
+    `UPDATE ${CLAUDE_MESSAGES_TABLE}
+     SET text = ?,
+         timestamp = ?,
+         run_mode = ?,
+         agent_run_id = ?,
+         model_name = ?,
+         model_entry_id = ?,
+         model_provider_label = ?,
+         webchat_run_state = ?,
+         webchat_completion_reason = ?,
+         reasoning_summary = ?,
+         reasoning_details = ?
+     WHERE id = (
+       SELECT id
+       FROM ${CLAUDE_MESSAGES_TABLE}
+       WHERE conversation_key = ? AND role = 'assistant'
+       ORDER BY timestamp DESC, id DESC
+       LIMIT 1
+     )`,
+    [
+      message.text || "",
+      Number.isFinite(message.timestamp) ? Math.floor(message.timestamp) : Date.now(),
+      message.runMode || null,
+      message.agentRunId || null,
+      message.modelName || null,
+      message.modelEntryId || null,
+      message.modelProviderLabel || null,
+      message.webchatRunState || null,
+      message.webchatCompletionReason || null,
+      message.reasoningSummary || null,
+      message.reasoningDetails || null,
+      normalizedKey,
+    ],
+  );
+}
+
+type ClaudeConversationRow = {
+  conversationKey?: unknown;
+  libraryID?: unknown;
+  kind?: unknown;
+  paperItemID?: unknown;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  title?: unknown;
+  providerSessionId?: unknown;
+  scopedConversationKey?: unknown;
+  scopeType?: unknown;
+  scopeId?: unknown;
+  scopeLabel?: unknown;
+  cwd?: unknown;
+  modelName?: unknown;
+  effort?: unknown;
+  userTurnCount?: unknown;
+};
+
+function toClaudeConversationSummary(
+  row: ClaudeConversationRow,
+): ClaudeConversationSummary | null {
+  const conversationKey = normalizeConversationKey(Number(row.conversationKey));
+  const libraryID = normalizeLibraryID(Number(row.libraryID));
+  const createdAt = normalizeCatalogTimestamp(row.createdAt);
+  const updatedAt = normalizeCatalogTimestamp(row.updatedAt);
+  const kind = row.kind === "paper" ? "paper" : row.kind === "global" ? "global" : null;
+  if (!conversationKey || !libraryID || !kind) return null;
+  const paperItemID = normalizePaperItemID(Number(row.paperItemID));
+  const userTurnCount = Number(row.userTurnCount);
+  return {
+    conversationKey,
+    libraryID,
+    kind,
+    paperItemID: paperItemID || undefined,
+    createdAt,
+    updatedAt,
+    title:
+      typeof row.title === "string" && row.title.trim()
+        ? row.title.trim()
+        : undefined,
+    providerSessionId:
+      typeof row.providerSessionId === "string" && row.providerSessionId.trim()
+        ? row.providerSessionId.trim()
+        : undefined,
+    scopedConversationKey:
+      typeof row.scopedConversationKey === "string" && row.scopedConversationKey.trim()
+        ? row.scopedConversationKey.trim()
+        : undefined,
+    scopeType:
+      typeof row.scopeType === "string" && row.scopeType.trim()
+        ? row.scopeType.trim()
+        : undefined,
+    scopeId:
+      typeof row.scopeId === "string" && row.scopeId.trim()
+        ? row.scopeId.trim()
+        : undefined,
+    scopeLabel:
+      typeof row.scopeLabel === "string" && row.scopeLabel.trim()
+        ? row.scopeLabel.trim()
+        : undefined,
+    cwd: typeof row.cwd === "string" && row.cwd.trim() ? row.cwd.trim() : undefined,
+    model:
+      typeof row.modelName === "string" && row.modelName.trim()
+        ? row.modelName.trim()
+        : undefined,
+    effort:
+      typeof row.effort === "string" && row.effort.trim()
+        ? row.effort.trim()
+        : undefined,
+    userTurnCount: Number.isFinite(userTurnCount)
+      ? Math.max(0, Math.floor(userTurnCount))
+      : 0,
+  };
+}
+
+export async function getClaudeConversationSummary(
+  conversationKey: number,
+): Promise<ClaudeConversationSummary | null> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return null;
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT c.conversation_key AS conversationKey,
+            c.library_id AS libraryID,
+            c.kind AS kind,
+            c.paper_item_id AS paperItemID,
+            c.created_at AS createdAt,
+            c.updated_at AS updatedAt,
+            c.title AS title,
+            c.provider_session_id AS providerSessionId,
+            c.scoped_conversation_key AS scopedConversationKey,
+            c.scope_type AS scopeType,
+            c.scope_id AS scopeId,
+            c.scope_label AS scopeLabel,
+            c.cwd AS cwd,
+            c.model_name AS modelName,
+            c.effort AS effort,
+            COALESCE(
+              (SELECT COUNT(*)
+               FROM ${CLAUDE_MESSAGES_TABLE} m
+               WHERE m.conversation_key = c.conversation_key
+                 AND m.role = 'user'),
+              0
+            ) AS userTurnCount
+     FROM ${CLAUDE_CONVERSATIONS_TABLE} c
+     WHERE c.conversation_key = ?
+     LIMIT 1`,
+    [normalizedKey],
+  )) as ClaudeConversationRow[] | undefined;
+  return rows?.length ? toClaudeConversationSummary(rows[0]) : null;
+}
+
+export async function upsertClaudeConversationSummary(params: {
+  conversationKey: number;
+  libraryID: number;
+  kind: ClaudeConversationKind;
+  paperItemID?: number;
+  createdAt?: number;
+  updatedAt?: number;
+  title?: string;
+  providerSessionId?: string;
+  scopedConversationKey?: string;
+  scopeType?: string;
+  scopeId?: string;
+  scopeLabel?: string;
+  cwd?: string;
+  model?: string;
+  effort?: string;
+}): Promise<void> {
+  const conversationKey = normalizeConversationKey(params.conversationKey);
+  const libraryID = normalizeLibraryID(params.libraryID);
+  if (!conversationKey || !libraryID) return;
+  const createdAt = normalizeCatalogTimestamp(params.createdAt);
+  const updatedAt = normalizeCatalogTimestamp(params.updatedAt);
+  await Zotero.DB.queryAsync(
+    `INSERT INTO ${CLAUDE_CONVERSATIONS_TABLE}
+      (conversation_key, library_id, kind, paper_item_id, created_at, updated_at, title, provider_session_id, scoped_conversation_key, scope_type, scope_id, scope_label, cwd, model_name, effort)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(conversation_key) DO UPDATE SET
+       library_id = excluded.library_id,
+       kind = excluded.kind,
+       paper_item_id = excluded.paper_item_id,
+       created_at = COALESCE(${CLAUDE_CONVERSATIONS_TABLE}.created_at, excluded.created_at),
+       updated_at = excluded.updated_at,
+       title = COALESCE(excluded.title, ${CLAUDE_CONVERSATIONS_TABLE}.title),
+       provider_session_id = COALESCE(excluded.provider_session_id, ${CLAUDE_CONVERSATIONS_TABLE}.provider_session_id),
+       scoped_conversation_key = COALESCE(excluded.scoped_conversation_key, ${CLAUDE_CONVERSATIONS_TABLE}.scoped_conversation_key),
+       scope_type = COALESCE(excluded.scope_type, ${CLAUDE_CONVERSATIONS_TABLE}.scope_type),
+       scope_id = COALESCE(excluded.scope_id, ${CLAUDE_CONVERSATIONS_TABLE}.scope_id),
+       scope_label = COALESCE(excluded.scope_label, ${CLAUDE_CONVERSATIONS_TABLE}.scope_label),
+       cwd = COALESCE(excluded.cwd, ${CLAUDE_CONVERSATIONS_TABLE}.cwd),
+       model_name = COALESCE(excluded.model_name, ${CLAUDE_CONVERSATIONS_TABLE}.model_name),
+       effort = COALESCE(excluded.effort, ${CLAUDE_CONVERSATIONS_TABLE}.effort)`,
+    [
+      conversationKey,
+      libraryID,
+      params.kind,
+      normalizePaperItemID(Number(params.paperItemID)) || null,
+      createdAt,
+      updatedAt,
+      normalizeConversationTitleSeed(params.title || "") || null,
+      params.providerSessionId?.trim() || null,
+      params.scopedConversationKey?.trim() || null,
+      params.scopeType?.trim() || null,
+      params.scopeId?.trim() || null,
+      params.scopeLabel?.trim() || null,
+      params.cwd?.trim() || null,
+      params.model?.trim() || null,
+      params.effort?.trim() || null,
+    ],
+  );
+}
+
+async function listClaudeConversations(params: {
+  libraryID: number;
+  kind: ClaudeConversationKind;
+  paperItemID?: number;
+  limit?: number;
+}): Promise<ClaudeConversationSummary[]> {
+  const libraryID = normalizeLibraryID(params.libraryID);
+  if (!libraryID) return [];
+  const limit = normalizeLimit(params.limit ?? 50, 50);
+  const sql = params.kind === "paper"
+    ? `SELECT c.conversation_key AS conversationKey,
+              c.library_id AS libraryID,
+              c.kind AS kind,
+              c.paper_item_id AS paperItemID,
+              c.created_at AS createdAt,
+              c.updated_at AS updatedAt,
+              c.title AS title,
+              c.provider_session_id AS providerSessionId,
+              c.scoped_conversation_key AS scopedConversationKey,
+              c.scope_type AS scopeType,
+              c.scope_id AS scopeId,
+              c.scope_label AS scopeLabel,
+              c.cwd AS cwd,
+              c.model_name AS modelName,
+              c.effort AS effort,
+              COALESCE(
+                (SELECT COUNT(*)
+                 FROM ${CLAUDE_MESSAGES_TABLE} m
+                 WHERE m.conversation_key = c.conversation_key
+                   AND m.role = 'user'),
+                0
+              ) AS userTurnCount
+       FROM ${CLAUDE_CONVERSATIONS_TABLE} c
+       WHERE c.library_id = ?
+         AND c.kind = 'paper'
+         AND c.paper_item_id = ?
+       ORDER BY c.updated_at DESC, c.conversation_key DESC
+       LIMIT ?`
+    : `SELECT c.conversation_key AS conversationKey,
+              c.library_id AS libraryID,
+              c.kind AS kind,
+              c.paper_item_id AS paperItemID,
+              c.created_at AS createdAt,
+              c.updated_at AS updatedAt,
+              c.title AS title,
+              c.provider_session_id AS providerSessionId,
+              c.scoped_conversation_key AS scopedConversationKey,
+              c.scope_type AS scopeType,
+              c.scope_id AS scopeId,
+              c.scope_label AS scopeLabel,
+              c.cwd AS cwd,
+              c.model_name AS modelName,
+              c.effort AS effort,
+              COALESCE(
+                (SELECT COUNT(*)
+                 FROM ${CLAUDE_MESSAGES_TABLE} m
+                 WHERE m.conversation_key = c.conversation_key
+                   AND m.role = 'user'),
+                0
+              ) AS userTurnCount
+       FROM ${CLAUDE_CONVERSATIONS_TABLE} c
+       WHERE c.library_id = ?
+         AND c.kind = 'global'
+       ORDER BY c.updated_at DESC, c.conversation_key DESC
+       LIMIT ?`;
+  const rows = (await Zotero.DB.queryAsync(
+    sql,
+    params.kind === "paper"
+      ? [libraryID, normalizePaperItemID(Number(params.paperItemID)) || 0, limit]
+      : [libraryID, limit],
+  )) as ClaudeConversationRow[] | undefined;
+  if (!rows?.length) return [];
+  return rows
+    .map((row) => toClaudeConversationSummary(row))
+    .filter((row): row is ClaudeConversationSummary => Boolean(row));
+}
+
+export async function listClaudeGlobalConversations(
+  libraryID: number,
+  limit = 50,
+): Promise<ClaudeConversationSummary[]> {
+  return listClaudeConversations({ libraryID, kind: "global", limit });
+}
+
+export async function listClaudePaperConversations(
+  libraryID: number,
+  paperItemID: number,
+  limit = 50,
+): Promise<ClaudeConversationSummary[]> {
+  return listClaudeConversations({ libraryID, kind: "paper", paperItemID, limit });
+}
+
+export async function listAllClaudePaperConversationsByLibrary(
+  libraryID: number,
+  limit = 100,
+): Promise<ClaudeConversationSummary[]> {
+  const normalizedLibraryID = normalizeLibraryID(libraryID);
+  if (!normalizedLibraryID) return [];
+  const normalizedLimit = normalizeLimit(limit, 100);
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT c.conversation_key AS conversationKey,
+            c.library_id AS libraryID,
+            c.kind AS kind,
+            c.paper_item_id AS paperItemID,
+            c.created_at AS createdAt,
+            c.updated_at AS updatedAt,
+            c.title AS title,
+            c.provider_session_id AS providerSessionId,
+            c.scoped_conversation_key AS scopedConversationKey,
+            c.scope_type AS scopeType,
+            c.scope_id AS scopeId,
+            c.scope_label AS scopeLabel,
+            c.cwd AS cwd,
+            c.model_name AS modelName,
+            c.effort AS effort,
+            COALESCE(
+              (SELECT COUNT(*)
+               FROM ${CLAUDE_MESSAGES_TABLE} m
+               WHERE m.conversation_key = c.conversation_key
+                 AND m.role = 'user'),
+              0
+            ) AS userTurnCount
+     FROM ${CLAUDE_CONVERSATIONS_TABLE} c
+     WHERE c.library_id = ?
+       AND c.kind = 'paper'
+       AND COALESCE(
+         (SELECT COUNT(*)
+          FROM ${CLAUDE_MESSAGES_TABLE} m
+          WHERE m.conversation_key = c.conversation_key
+            AND m.role = 'user'),
+         0
+       ) > 0
+     ORDER BY c.updated_at DESC, c.conversation_key DESC
+     LIMIT ?`,
+    [normalizedLibraryID, normalizedLimit],
+  )) as ClaudeConversationRow[] | undefined;
+  if (!rows?.length) return [];
+  return rows
+    .map((row) => toClaudeConversationSummary(row))
+    .filter((row): row is ClaudeConversationSummary => Boolean(row));
+}
+
+export async function ensureClaudeGlobalConversation(
+  libraryID: number,
+): Promise<ClaudeConversationSummary | null> {
+  const normalizedLibraryID = normalizeLibraryID(libraryID);
+  if (!normalizedLibraryID) return null;
+  const conversationKey = buildDefaultClaudeGlobalConversationKey(normalizedLibraryID);
+  await upsertClaudeConversationSummary({
+    conversationKey,
+    libraryID: normalizedLibraryID,
+    kind: "global",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  return getClaudeConversationSummary(conversationKey);
+}
+
+export async function ensureClaudePaperConversation(
+  libraryID: number,
+  paperItemID: number,
+): Promise<ClaudeConversationSummary | null> {
+  const normalizedLibraryID = normalizeLibraryID(libraryID);
+  const normalizedPaperItemID = normalizePaperItemID(paperItemID);
+  if (!normalizedLibraryID || !normalizedPaperItemID) return null;
+  const conversationKey = buildDefaultClaudePaperConversationKey(normalizedPaperItemID);
+  await upsertClaudeConversationSummary({
+    conversationKey,
+    libraryID: normalizedLibraryID,
+    kind: "paper",
+    paperItemID: normalizedPaperItemID,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  return getClaudeConversationSummary(conversationKey);
+}
+
+async function getMaxClaudeConversationKey(kind: ClaudeConversationKind): Promise<number> {
+  const rows = (await Zotero.DB.queryAsync(
+    `SELECT MAX(conversation_key) AS maxConversationKey
+     FROM ${CLAUDE_CONVERSATIONS_TABLE}
+     WHERE kind = ?
+       AND conversation_key >= ?
+       AND conversation_key < ?`,
+    kind === "global"
+      ? [
+          "global",
+          CLAUDE_GLOBAL_CONVERSATION_KEY_BASE,
+          CLAUDE_PAPER_CONVERSATION_KEY_BASE,
+        ]
+      : ["paper", CLAUDE_PAPER_CONVERSATION_KEY_BASE, Number.MAX_SAFE_INTEGER],
+  )) as Array<{ maxConversationKey?: unknown }> | undefined;
+  const maxConversationKey = Number(rows?.[0]?.maxConversationKey);
+  if (!Number.isFinite(maxConversationKey) || maxConversationKey <= 0) {
+    return kind === "global"
+      ? CLAUDE_GLOBAL_CONVERSATION_KEY_BASE
+      : CLAUDE_PAPER_CONVERSATION_KEY_BASE;
+  }
+  return Math.floor(maxConversationKey);
+}
+
+export async function createClaudeGlobalConversation(
+  libraryID: number,
+): Promise<ClaudeConversationSummary | null> {
+  const normalizedLibraryID = normalizeLibraryID(libraryID);
+  if (!normalizedLibraryID) return null;
+  const nextKey = Math.max(
+    buildDefaultClaudeGlobalConversationKey(normalizedLibraryID),
+    (await getMaxClaudeConversationKey("global")) + 1,
+  );
+  await upsertClaudeConversationSummary({
+    conversationKey: nextKey,
+    libraryID: normalizedLibraryID,
+    kind: "global",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  return getClaudeConversationSummary(nextKey);
+}
+
+export async function createClaudePaperConversation(
+  libraryID: number,
+  paperItemID: number,
+): Promise<ClaudeConversationSummary | null> {
+  const normalizedLibraryID = normalizeLibraryID(libraryID);
+  const normalizedPaperItemID = normalizePaperItemID(paperItemID);
+  if (!normalizedLibraryID || !normalizedPaperItemID) return null;
+  const nextKey = Math.max(
+    buildDefaultClaudePaperConversationKey(normalizedPaperItemID),
+    (await getMaxClaudeConversationKey("paper")) + 1,
+  );
+  await upsertClaudeConversationSummary({
+    conversationKey: nextKey,
+    libraryID: normalizedLibraryID,
+    kind: "paper",
+    paperItemID: normalizedPaperItemID,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  return getClaudeConversationSummary(nextKey);
+}
+
+export async function touchClaudeConversationTitle(
+  conversationKey: number,
+  titleSeed: string,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  const title = normalizeConversationTitleSeed(titleSeed);
+  if (!title) return;
+  await Zotero.DB.queryAsync(
+    `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
+     SET title = ?
+     WHERE conversation_key = ?
+       AND (title IS NULL OR TRIM(title) = '')`,
+    [title, normalizedKey],
+  );
+}
+
+export async function setClaudeConversationTitle(
+  conversationKey: number,
+  titleSeed: string,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  await Zotero.DB.queryAsync(
+    `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
+     SET title = ?
+     WHERE conversation_key = ?`,
+    [normalizeConversationTitleSeed(titleSeed) || null, normalizedKey],
+  );
+}
+
+export async function deleteClaudeConversation(
+  conversationKey: number,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  await Zotero.DB.queryAsync(
+    `DELETE FROM ${CLAUDE_CONVERSATIONS_TABLE}
+     WHERE conversation_key = ?`,
+    [normalizedKey],
+  );
+}

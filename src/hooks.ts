@@ -11,6 +11,8 @@ import {
 } from "./modules/contextPanel";
 import { invalidatePaperSearchCache } from "./modules/contextPanel/paperSearch";
 import { initChatStore } from "./utils/chatStore";
+import { initClaudeCodeStore } from "./claudeCode/store";
+import { ensureClaudeProjectBootstrap } from "./claudeCode/bootstrap";
 import {
   initAttachmentRefStore,
   reconcileNoteAttachmentRefsFromNoteContent,
@@ -49,6 +51,16 @@ async function onStartup() {
     await initChatStore();
   } catch (err) {
     ztoolkit.log("LLM: Failed to initialize chat store", err);
+  }
+  try {
+    await initClaudeCodeStore();
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to initialize Claude Code store", err);
+  }
+  try {
+    await ensureClaudeProjectBootstrap();
+  } catch (err) {
+    ztoolkit.log("LLM: Failed to bootstrap Claude project config", err);
   }
   try {
     await initAgentSubsystem();
