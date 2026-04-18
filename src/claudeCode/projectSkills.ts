@@ -20,15 +20,78 @@ type IOUtilsLike = {
   remove?: (path: string) => Promise<void>;
 };
 
+type ProcessLike = { env?: Record<string, string | undefined> };
+type PathUtilsLike = { homeDir?: string };
+type ServicesLike = {
+  dirsvc?: {
+    get?: (key: string, iface?: unknown) => { path?: string } | undefined;
+  };
+};
+type OSLike = {
+  Constants?: {
+    Path?: {
+      homeDir?: string;
+    };
+  };
+};
+
+function getToolkitGlobal<T>(name: string): T | undefined {
+  const toolkit = (globalThis as { ztoolkit?: { getGlobal?: (key: string) => unknown } })
+    .ztoolkit;
+  if (!toolkit?.getGlobal) return undefined;
+  return toolkit.getGlobal(name) as T | undefined;
+}
+
 function getIOUtils(): IOUtilsLike | undefined {
-  return (globalThis as unknown as { IOUtils?: IOUtilsLike }).IOUtils;
+  return (globalThis as unknown as { IOUtils?: IOUtilsLike }).IOUtils ||
+    getToolkitGlobal<IOUtilsLike>("IOUtils");
+}
+
+function getProcess(): ProcessLike | undefined {
+  const fromGlobal = (globalThis as { process?: ProcessLike }).process;
+  if (fromGlobal?.env) return fromGlobal;
+  return getToolkitGlobal<ProcessLike>("process")?.env
+    ? getToolkitGlobal<ProcessLike>("process")
+    : undefined;
+}
+
+function getPathUtils(): PathUtilsLike | undefined {
+  const fromGlobal = (globalThis as { PathUtils?: PathUtilsLike }).PathUtils;
+  if (fromGlobal?.homeDir) return fromGlobal;
+  return getToolkitGlobal<PathUtilsLike>("PathUtils");
+}
+
+function getServices(): ServicesLike | undefined {
+  const fromGlobal = (globalThis as { Services?: ServicesLike }).Services;
+  if (fromGlobal?.dirsvc?.get) return fromGlobal;
+  return getToolkitGlobal<ServicesLike>("Services");
+}
+
+function getOS(): OSLike | undefined {
+  const fromGlobal = (globalThis as { OS?: OSLike }).OS;
+  if (fromGlobal?.Constants?.Path?.homeDir) return fromGlobal;
+  return getToolkitGlobal<OSLike>("OS");
+}
+
+function getNsIFile(): unknown {
+  const ci = (globalThis as { Ci?: { nsIFile?: unknown } }).Ci;
+  if (ci?.nsIFile) return ci.nsIFile;
+  const components = (globalThis as {
+    Components?: { interfaces?: { nsIFile?: unknown } };
+  }).Components;
+  return components?.interfaces?.nsIFile;
 }
 
 function getHomeDir(): string {
-  const env = (globalThis as unknown as {
-    process?: { env?: Record<string, string | undefined> };
-  }).process?.env;
-  const home = env?.HOME?.trim() || env?.USERPROFILE?.trim() || "";
+  const env = getProcess()?.env;
+  const home =
+    env?.HOME?.trim() ||
+    env?.USERPROFILE?.trim() ||
+    getPathUtils()?.homeDir?.trim() ||
+    getOS()?.Constants?.Path?.homeDir?.trim() ||
+    getServices()?.dirsvc?.get?.("Home", getNsIFile())?.path?.trim() ||
+    (Zotero as unknown as { Profile?: { dir?: string } }).Profile?.dir?.trim() ||
+    "";
   if (home) return home;
   throw new Error("Cannot resolve home directory for Claude runtime root");
 }
@@ -85,27 +148,46 @@ export async function ensureClaudeProjectSkillStructure(): Promise<void> {
 export async function listClaudeProjectSkillEntries(): Promise<ClaudeProjectSkillEntry[]> {
   const io = getIOUtils();
   if (!io?.exists || !io?.read || !io?.getChildren) return [];
+  await ensureClaudeProjectSkillStructure();
   const skillsDir = getClaudeProjectSkillsDir();
   const commandsDir = getClaudeProjectCommandsDir();
   const entries: ClaudeProjectSkillEntry[] = [];
 
+  const readMarkdownEntry = async (filePath: string, fallback: string): Promise<void> => {
+    const data = await io.read?.(filePath);
+    if (!data) return;
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const raw = new TextDecoder("utf-8").decode(bytes);
+    entries.push({
+      name: parseCommandName(raw, fallback),
+      filePath,
+      description: parseDescription(raw),
+    });
+  };
+
+  const walkSkillDirs = async (dirPath: string): Promise<void> => {
+    let children: string[] = [];
+    try {
+      children = (await io.getChildren?.(dirPath)) || [];
+    } catch {
+      return;
+    }
+    for (const childPath of children) {
+      const skillFile = joinLocalPath(childPath, "SKILL.md");
+      if (await io.exists?.(skillFile)) {
+        const skillName = childPath.split(/[\\/]/).pop() || "";
+        if (skillName) {
+          await readMarkdownEntry(skillFile, skillName);
+        }
+        continue;
+      }
+      await walkSkillDirs(childPath);
+    }
+  };
+
   try {
     if (await io.exists(skillsDir)) {
-      const skillDirs = await io.getChildren(skillsDir);
-      for (const dirPath of skillDirs) {
-        const skillName = dirPath.split(/[\\/]/).pop() || "";
-        if (!skillName) continue;
-        const filePath = joinLocalPath(dirPath, "SKILL.md");
-        if (!(await io.exists(filePath))) continue;
-        const data = await io.read(filePath);
-        const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-        const raw = new TextDecoder("utf-8").decode(bytes);
-        entries.push({
-          name: parseCommandName(raw, skillName),
-          filePath,
-          description: parseDescription(raw),
-        });
-      }
+      await walkSkillDirs(skillsDir);
     }
   } catch {
     // ignore and continue to commands
@@ -117,14 +199,7 @@ export async function listClaudeProjectSkillEntries(): Promise<ClaudeProjectSkil
       for (const filePath of commandFiles) {
         if (!filePath.endsWith(".md")) continue;
         const filename = filePath.split(/[\\/]/).pop() || filePath;
-        const data = await io.read(filePath);
-        const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-        const raw = new TextDecoder("utf-8").decode(bytes);
-        entries.push({
-          name: parseCommandName(raw, filename),
-          filePath,
-          description: parseDescription(raw),
-        });
+        await readMarkdownEntry(filePath, filename);
       }
     }
   } catch {

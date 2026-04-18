@@ -41,7 +41,6 @@ import {
   clearConversation as clearStoredConversation,
   deleteGlobalConversation,
   deletePaperConversation,
-  getGlobalConversationUserTurnCount,
   loadConversation,
 } from "../../utils/chatStore";
 import { removeConversationAttachmentFiles } from "./attachmentStorage";
@@ -1949,26 +1948,38 @@ export function openStandaloneChat(options?: {
         await refreshClaudeSlashCommands(getCoreAgentRuntime(), true);
       };
 
+      const resolveSkillPopupSystem = (): "upstream" | "claude_code" =>
+        resolveConversationSystemForItem(activeItem) === "claude_code"
+          ? "claude_code"
+          : "upstream";
+
+      let skillRenderSeq = 0;
       const renderSkillGrid = async () => {
-        const isClaudeMode = isClaudeConversationSystem();
-        const entries: Array<{
-          filePath: string;
-          filename: string;
-          description: string;
-          source: "system" | "customized" | "personal";
-          managedBlockOutdated?: boolean;
-          shippedVersion?: number | null;
-          version?: number;
-          id?: string;
-        }> = isClaudeMode
-          ? (await listClaudeProjectSkillEntries()).map((entry) => ({
-              filePath: entry.filePath,
-              filename: `/${entry.name}`,
-              description: entry.description,
-              source: "personal" as const,
-            }))
-          : await (await import("../../agent/skills/userSkills")).getSkillListing();
-        skillGrid.textContent = "";
+        const renderSeq = ++skillRenderSeq;
+        const skillSystem = resolveSkillPopupSystem();
+        const isClaudeMode = skillSystem === "claude_code";
+        try {
+          const entries: Array<{
+            filePath: string;
+            filename: string;
+            description: string;
+            source: "system" | "customized" | "personal";
+            managedBlockOutdated?: boolean;
+            shippedVersion?: number | null;
+            version?: number;
+            id?: string;
+          }> = isClaudeMode
+            ? (await listClaudeProjectSkillEntries()).map((entry) => ({
+                filePath: entry.filePath,
+                filename: `/${entry.name}`,
+                description: entry.description,
+                source: "personal" as const,
+              }))
+            : await (await import("../../agent/skills/userSkills")).getSkillListing();
+          if (renderSeq !== skillRenderSeq || skillSystem !== resolveSkillPopupSystem()) {
+            return;
+          }
+          skillGrid.textContent = "";
 
         // "+" add button — first grid item
         const addBtn = doc.createElementNS(
@@ -2099,11 +2110,29 @@ export function openStandaloneChat(options?: {
 
           skillGrid.appendChild(item);
         }
+        } catch (err) {
+          if (renderSeq !== skillRenderSeq) return;
+          skillGrid.textContent = "";
+          const errorEl = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
+          errorEl.className = "llm-standalone-sidebar-empty";
+          errorEl.textContent = t("Failed to load skills");
+          skillGrid.appendChild(errorEl);
+          Zotero.debug?.(
+            `[llm-for-zotero] Standalone skill grid render failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       };
 
       const openSkillPopup = () => {
         skillOverlay.style.display = "flex";
-        if (isClaudeConversationSystem()) {
+        skillGrid.textContent = "";
+        const loading = doc.createElementNS(HTML_NS, "div") as HTMLDivElement;
+        loading.className = "llm-standalone-sidebar-empty";
+        loading.textContent = t("Loading…");
+        skillGrid.appendChild(loading);
+        if (resolveSkillPopupSystem() === "claude_code") {
           void reloadClaudeProjectCommands();
         } else {
           void reloadRuntimeSkills();
@@ -2143,7 +2172,7 @@ export function openStandaloneChat(options?: {
       // Context menu: Show in file system
       skillCtxShowInFs.addEventListener("click", async () => {
         skillCtxMenu.style.display = "none";
-        const dir = isClaudeConversationSystem()
+        const dir = resolveSkillPopupSystem() === "claude_code"
           ? getClaudeProjectDir()
           : (await import("../../agent/skills/userSkills")).getUserSkillsDir();
         try {
@@ -2154,6 +2183,15 @@ export function openStandaloneChat(options?: {
           /* */
         }
       });
+
+      const refreshSkillPopupForCurrentSystem = async () => {
+        if (resolveSkillPopupSystem() === "claude_code") {
+          await reloadClaudeProjectCommands();
+        } else {
+          await reloadRuntimeSkills();
+        }
+        await renderSkillGrid();
+      };
 
       // Context menu: Restore to default (customized built-ins only)
       skillCtxRestore.addEventListener("click", async () => {
@@ -2177,8 +2215,7 @@ export function openStandaloneChat(options?: {
         skillCtxFilePath = "";
         skillCtxFilename = "";
         if (ok) {
-          await reloadRuntimeSkills();
-          void renderSkillGrid();
+          await refreshSkillPopupForCurrentSystem();
         }
       });
 
@@ -2186,7 +2223,7 @@ export function openStandaloneChat(options?: {
       skillCtxDelete.addEventListener("click", async () => {
         skillCtxMenu.style.display = "none";
         if (!skillCtxFilePath) return;
-        if (isClaudeConversationSystem()) {
+        if (resolveSkillPopupSystem() === "claude_code") {
           await deleteClaudeProjectSkillFile(skillCtxFilePath);
           await reloadClaudeProjectCommands();
         } else {
@@ -2197,10 +2234,7 @@ export function openStandaloneChat(options?: {
         }
         skillCtxFilePath = "";
         skillCtxFilename = "";
-        if (!isClaudeConversationSystem()) {
-          await reloadRuntimeSkills();
-        }
-        void renderSkillGrid();
+        await refreshSkillPopupForCurrentSystem();
       });
 
       // Header: Check for updates — re-seed built-ins and refresh the grid
@@ -2209,11 +2243,15 @@ export function openStandaloneChat(options?: {
         const originalText = skillRefreshBtn.textContent;
         skillRefreshBtn.textContent = t("Checking…");
         try {
-          const { initUserSkills } = await import(
-            "../../agent/skills/userSkills"
-          );
-          await initUserSkills();
-          await reloadRuntimeSkills();
+          if (resolveSkillPopupSystem() === "claude_code") {
+            await reloadClaudeProjectCommands();
+          } else {
+            const { initUserSkills } = await import(
+              "../../agent/skills/userSkills"
+            );
+            await initUserSkills();
+            await reloadRuntimeSkills();
+          }
           await renderSkillGrid();
           skillRefreshBtn.textContent = t("Up to date");
           doc.defaultView?.setTimeout(() => {
@@ -2666,10 +2704,12 @@ export function openStandaloneChat(options?: {
       // -----------------------------------------------------------------------
       // Top bar tab switching
       // -----------------------------------------------------------------------
+      let systemSwitchSeq = 0;
       const switchConversationSystem = async (
         nextSystem: "upstream" | "claude_code",
         options?: { forceFresh?: boolean },
       ) => {
+        const switchSeq = ++systemSwitchSeq;
         const currentSystem = isClaudeConversationSystem() ? "claude_code" : "upstream";
         if (nextSystem === currentSystem) return;
         const forceFresh = options?.forceFresh === true;
@@ -2679,6 +2719,7 @@ export function openStandaloneChat(options?: {
         if (standaloneMode === "open") {
           const libraryID = getCurrentLibraryScopeID();
           const mountOpenConversation = (conversationKey: number) => {
+            if (switchSeq !== systemSwitchSeq) return;
             const nextItem =
               nextSystem === "claude_code"
                 ? createClaudeGlobalPortalItem(libraryID, conversationKey)
@@ -2698,6 +2739,7 @@ export function openStandaloneChat(options?: {
             const newKey = nextSystem === "claude_code"
               ? Number((await createClaudeGlobalConversation(libraryID))?.conversationKey || 0)
               : await createGlobalConversation(libraryID);
+            if (switchSeq !== systemSwitchSeq) return;
             if (newKey > 0) {
               mountOpenConversation(newKey);
             }
@@ -2714,6 +2756,7 @@ export function openStandaloneChat(options?: {
             const targetKey = Number.isFinite(rememberedKey) && rememberedKey > 0
               ? Math.floor(rememberedKey)
               : buildDefaultClaudeGlobalConversationKey(libraryID);
+            if (switchSeq !== systemSwitchSeq) return;
             if (targetKey > 0) {
               mountOpenConversation(targetKey);
             }
@@ -2728,6 +2771,7 @@ export function openStandaloneChat(options?: {
           const targetKey = Number.isFinite(rememberedUpstreamKey) && rememberedUpstreamKey > 0
             ? Math.floor(rememberedUpstreamKey)
             : GLOBAL_CONVERSATION_KEY_BASE;
+          if (switchSeq !== systemSwitchSeq) return;
           if (targetKey > 0) {
             mountOpenConversation(targetKey);
           }
@@ -2754,6 +2798,7 @@ export function openStandaloneChat(options?: {
             newKey = Number(summary?.conversationKey || 0);
             sessionVersion = summary?.sessionVersion;
           }
+          if (switchSeq !== systemSwitchSeq) return;
           if (!newKey) return;
           const freshItem = nextSystem === "claude_code"
             ? createClaudePaperPortalItem(paperItem, newKey)
@@ -2765,6 +2810,7 @@ export function openStandaloneChat(options?: {
           updateStandaloneSystemToggle();
           return;
         }
+        if (switchSeq !== systemSwitchSeq) return;
         const nextItem = resolved.item || nextRawItem;
         if (nextItem) {
           mountChatPanel(nextItem);

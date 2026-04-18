@@ -543,19 +543,31 @@ export function setupHandlers(
     delete (body as any).__llmResizeObservers;
   }
 
+  const syncRequestUiForCurrentConversation = () => {
+    const activeConversationKey = item ? getConversationKey(item) : null;
+    const isCurrentConversationPending =
+      activeConversationKey !== null &&
+      Number.isFinite(activeConversationKey) &&
+      isRequestPending(activeConversationKey);
+    if (isCurrentConversationPending) {
+      if (sendBtn) sendBtn.style.display = "none";
+      if (cancelBtn) cancelBtn.style.display = "";
+      if (inputBox) inputBox.disabled = true;
+      return;
+    }
+    if (cancelBtn) cancelBtn.style.display = "none";
+    if (sendBtn) {
+      sendBtn.style.display = "";
+      sendBtn.disabled = !item;
+    }
+    if (inputBox) inputBox.disabled = !item;
+  };
+
   // buildUI() wipes body.textContent whenever onAsyncRender fires (item
   // navigation), which destroys the cancel/send button DOM mid-stream.
-  // Re-apply the generating state immediately so the user never sees a stale
-  // idle UI while a request is still running in the background.
-  // Only lock the UI if the CURRENT conversation has a pending request.
-  const earlyConversationKey = item ? getConversationKey(item) : null;
-  if (earlyConversationKey !== null && isRequestPending(earlyConversationKey)) {
-    if (sendBtn) sendBtn.style.display = "none";
-    if (cancelBtn) cancelBtn.style.display = "";
-    if (inputBox) inputBox.disabled = true;
-    // History controls are intentionally left enabled so the user can
-    // switch conversations or create new ones while a request is in flight.
-  }
+  // Re-apply the current conversation's request state immediately so a panel
+  // switch never inherits stale send/cancel UI from another conversation.
+  syncRequestUiForCurrentConversation();
 
   const panelDoc = body.ownerDocument;
   if (!panelDoc) {
@@ -926,6 +938,7 @@ export function setupHandlers(
         }
       }
     }
+    syncRequestUiForCurrentConversation();
     if (historyModeIndicator) {
       // Keep historyModeIndicator (which is the clock history button) accessible.
       // Its label is static "Conversation history" — no text update needed.
@@ -3006,6 +3019,7 @@ export function setupHandlers(
     applySelectedTextPreview(body, textContextKey);
   };
   const syncConversationPanelState = () => {
+    syncRequestUiForCurrentConversation();
     restoreDraftInputForCurrentConversation();
     updatePaperPreview();
     updateFilePreview();
@@ -11622,7 +11636,48 @@ export function setupHandlers(
         }
       }
 
-      const retryTarget = (e.target as Element | null)?.closest(
+      const target = e.target as Element | null;
+      const copyBtn = target?.closest(
+        ".llm-render-copy-btn",
+      ) as HTMLButtonElement | null;
+      if (copyBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const copyable = copyBtn.closest(".llm-copyable") as HTMLElement | null;
+        const source = copyable?.dataset.llmCopySource || "";
+        if (source) {
+          copyable?.setAttribute("data-copy-feedback", "copied");
+          void copyTextToClipboard(body, source);
+        }
+        return;
+      }
+
+      const linkTarget = target?.closest("a[href]") as HTMLAnchorElement | null;
+      if (linkTarget) {
+        e.preventDefault();
+        e.stopPropagation();
+        const href = linkTarget.href?.trim();
+        if (href) {
+          try {
+            const launch = (Zotero as unknown as { launchURL?: (url: string) => void })
+              .launchURL;
+            if (typeof launch === "function") {
+              launch(href);
+              return;
+            }
+          } catch {
+            /* ignore */
+          }
+          try {
+            body.ownerDocument?.defaultView?.open?.(href, "_blank");
+          } catch {
+            /* ignore */
+          }
+        }
+        return;
+      }
+
+      const retryTarget = target?.closest(
         ".llm-retry-latest",
       ) as HTMLButtonElement | null;
       if (!retryTarget) return;

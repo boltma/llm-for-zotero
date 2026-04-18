@@ -455,6 +455,39 @@ function renderUserBubbleContent(
   }
 }
 
+function attachRenderedCopyButtons(root: ParentNode, doc: Document): void {
+  const copyables = Array.from(
+    root.querySelectorAll(".llm-copyable[data-llm-copy-source]"),
+  ) as HTMLElement[];
+  for (const copyable of copyables) {
+    if (copyable.classList.contains("llm-copyable-inline")) continue;
+    if (!copyable.dataset.copyFeedbackBound) {
+      copyable.dataset.copyFeedbackBound = "true";
+      const clearCopyFeedback = () => {
+        delete copyable.dataset.copyFeedback;
+      };
+      copyable.addEventListener("mouseleave", clearCopyFeedback);
+      copyable.addEventListener("focusout", (event: FocusEvent) => {
+        const next = event.relatedTarget as Node | null;
+        if (!next || !copyable.contains(next)) {
+          clearCopyFeedback();
+        }
+      });
+    }
+    const existing = copyable.querySelector(
+      ":scope > .llm-render-copy-btn",
+    ) as HTMLButtonElement | null;
+    if (existing) continue;
+    const button = doc.createElement("button") as HTMLButtonElement;
+    button.type = "button";
+    button.className = "llm-render-copy-btn";
+    button.textContent = "⧉";
+    button.title = "Copy original markdown";
+    button.setAttribute("aria-label", "Copy original markdown");
+    copyable.insertBefore(button, copyable.firstChild);
+  }
+}
+
 function getMessageSelectedTextExpandedIndex(
   message: Message,
   count: number,
@@ -4439,6 +4472,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
             ? buildImageResolver(ctxItem.id)
             : undefined;
           bubble.innerHTML = renderMarkdown(safeText, { resolveImage });
+          attachRenderedCopyButtons(bubble, doc);
         } catch (err) {
           ztoolkit.log("LLM render error:", err);
           bubble.textContent = safeText;
@@ -4586,6 +4620,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           text.className = "llm-agent-reasoning-text";
           try {
             text.innerHTML = renderMarkdown(msg.reasoningSummary || "");
+            attachRenderedCopyButtons(text, doc);
           } catch (err) {
             ztoolkit.log("LLM reasoning render error:", err);
             text.textContent = msg.reasoningSummary || "";
@@ -4604,6 +4639,7 @@ export function refreshChat(body: Element, item?: Zotero.Item | null) {
           text.className = "llm-agent-reasoning-text";
           try {
             text.innerHTML = renderMarkdown(msg.reasoningDetails || "");
+            attachRenderedCopyButtons(text, doc);
           } catch (err) {
             ztoolkit.log("LLM reasoning render error:", err);
             text.textContent = msg.reasoningDetails || "";
