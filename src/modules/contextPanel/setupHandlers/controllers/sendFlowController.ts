@@ -146,9 +146,12 @@ type SendFlowControllerDeps = {
 };
 
 export function createSendFlowController(deps: SendFlowControllerDeps): {
-  doSend: () => Promise<void>;
+  doSend: (options?: { overrideText?: string; preserveInputDraft?: boolean }) => Promise<void>;
 } {
-  const doSend = async () => {
+  const doSend = async (options?: {
+    overrideText?: string;
+    preserveInputDraft?: boolean;
+  }) => {
     const item = deps.getItem();
     if (!item) return;
 
@@ -158,7 +161,8 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
 
     try {
     const textContextConversationKey = deps.getConversationKey(item);
-    const text = deps.inputBox.value.trim();
+    const draftText = deps.inputBox.value.trim();
+    const text = (options?.overrideText ?? draftText).trim();
     const selectedContexts = deps.getSelectedTextContextEntries(
       textContextConversationKey,
     );
@@ -431,8 +435,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
         return;
       }
 
-      deps.inputBox.value = "";
-      deps.persistDraftInput();
+      if (!options?.preserveInputDraft) {
+        deps.inputBox.value = "";
+        deps.persistDraftInput();
+      }
       deps.retainPinnedImageState(item.id);
       if (hasPaperComposeState) {
         deps.consumePaperModeState(item.id);
@@ -454,8 +460,10 @@ export function createSendFlowController(deps: SendFlowControllerDeps): {
       return;
     }
 
-    deps.inputBox.value = "";
-    deps.persistDraftInput();
+    if (!options?.preserveInputDraft) {
+      deps.inputBox.value = "";
+      deps.persistDraftInput();
+    }
     deps.retainPinnedImageState(item.id);
     if (selectedFiles.length) {
       deps.retainPinnedFileState(item.id);

@@ -5,6 +5,7 @@ import { joinLocalPath } from "../utils/localPath";
 export type ClaudeProjectSkillEntry = {
   name: string;
   filePath: string;
+  openPath: string;
   description: string;
 };
 
@@ -17,7 +18,10 @@ type IOUtilsLike = {
     options?: { createAncestors?: boolean; ignoreExisting?: boolean },
   ) => Promise<void>;
   getChildren?: (path: string) => Promise<string[]>;
-  remove?: (path: string) => Promise<void>;
+  remove?: (
+    path: string,
+    options?: { recursive?: boolean; ignoreAbsent?: boolean },
+  ) => Promise<void>;
 };
 
 type ProcessLike = { env?: Record<string, string | undefined> };
@@ -158,9 +162,11 @@ export async function listClaudeProjectSkillEntries(): Promise<ClaudeProjectSkil
     if (!data) return;
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     const raw = new TextDecoder("utf-8").decode(bytes);
+    const isSkillFile = /[\\/]SKILL\.md$/i.test(filePath);
     entries.push({
       name: parseCommandName(raw, fallback),
       filePath,
+      openPath: isSkillFile ? filePath.replace(/[\\/]SKILL\.md$/i, "") : filePath,
       description: parseDescription(raw),
     });
   };
@@ -239,7 +245,16 @@ export async function deleteClaudeProjectSkillFile(filePath: string): Promise<bo
   const io = getIOUtils();
   if (!io?.remove) return false;
   try {
-    await io.remove(filePath);
+    const normalizedPath = filePath.trim();
+    const normalizedSkillsDir = getClaudeProjectSkillsDir();
+    const isSkillEntry = /[\\/]SKILL\.md$/i.test(normalizedPath) &&
+      normalizedPath.startsWith(normalizedSkillsDir);
+    if (isSkillEntry) {
+      const skillDir = normalizedPath.replace(/[\\/]SKILL\.md$/i, "");
+      await io.remove(skillDir, { recursive: true, ignoreAbsent: true });
+      return true;
+    }
+    await io.remove(normalizedPath, { ignoreAbsent: true });
     return true;
   } catch {
     return false;

@@ -754,6 +754,12 @@ function buildUI(body: Element, item?: Zotero.Item | null) {
   commandRow.appendChild(commandRowHeader);
   composeArea.appendChild(commandRow);
 
+  const queueBar = createElement(doc, "div", "llm-queued-input-bar", {
+    id: "llm-queued-input-bar",
+  });
+  queueBar.style.display = "none";
+  composeArea.appendChild(queueBar);
+
   const inputBox = createElement(doc, "textarea", "llm-input", {
     id: "llm-input",
     placeholder: hasItem

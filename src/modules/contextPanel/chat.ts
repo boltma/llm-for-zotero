@@ -1197,9 +1197,17 @@ function setRequestUIBusy(
   statusText: string,
 ): void {
   withScrollGuard(ui.chatBox, conversationKey, () => {
-    if (ui.sendBtn) ui.sendBtn.style.display = "none";
+    if (ui.sendBtn) {
+      ui.sendBtn.style.display = "none";
+      ui.sendBtn.disabled = false;
+    }
     if (ui.cancelBtn) ui.cancelBtn.style.display = "";
-    if (ui.inputBox) ui.inputBox.disabled = true;
+    if (ui.inputBox) {
+      const keepInputLive =
+        (body.querySelector("#llm-main") as HTMLElement | null)?.dataset
+          ?.conversationSystem === "claude_code";
+      ui.inputBox.disabled = keepInputLive ? false : true;
+    }
     if (ui.status) setStatus(ui.status, statusText, "sending");
   });
   // History controls are intentionally left enabled so the user can

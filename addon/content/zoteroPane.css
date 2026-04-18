@@ -5966,6 +5966,106 @@ label.llm-search-results-item:hover {
   color: var(--fill-tertiary);
 }
 
+.llm-queued-input-bar {
+  display: none;
+  align-items: stretch;
+  min-height: 22px;
+}
+
+.llm-queued-input-rail {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.llm-queued-input-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.llm-queued-input-empty {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 2px;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  white-space: nowrap;
+}
+
+.llm-queued-input-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.llm-queued-input-count {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.llm-queued-input-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--stroke-secondary) 70%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fill-quaternary) 68%, transparent);
+  color: var(--fill-secondary);
+  font-size: var(--llm-fs-10);
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-queued-input-remove,
+.llm-queued-input-cancel-mini {
+  appearance: none;
+  -moz-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--stroke-secondary) 75%, transparent);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fill-tertiary);
+  font-size: var(--llm-fs-10);
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.llm-queued-input-remove {
+  width: 24px;
+  min-width: 24px;
+  padding: 0;
+  font-size: 14px;
+}
+
+.llm-queued-input-remove:hover,
+.llm-queued-input-cancel-mini:hover {
+  color: var(--fill-primary);
+  background: color-mix(in srgb, var(--fill-quaternary) 72%, transparent);
+}
+
 /* Actions Bar */
 .llm-actions {
   --llm-action-height: 36px;
@@ -5999,7 +6099,7 @@ label.llm-search-results-item:hover {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 10px;
   flex: 0 0 auto;
   min-width: 0;
 }

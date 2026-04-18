@@ -498,6 +498,7 @@ export function setupHandlers(
     actionPicker,
     actionPickerList,
     actionHitlPanel,
+    queueBar,
     responseMenu,
     responseMenuCopyBtn,
     responseMenuNoteBtn,
@@ -543,24 +544,34 @@ export function setupHandlers(
     delete (body as any).__llmResizeObservers;
   }
 
+  let renderQueuedClaudeInputs: () => void = () => {};
+  let scheduleClaudeQueueDrain: () => void = () => {};
+  let isClaudeQueueSendAvailable: () => boolean = () => false;
+  let queueClaudeInput: (text: string) => void = () => {};
+
   const syncRequestUiForCurrentConversation = () => {
     const activeConversationKey = item ? getConversationKey(item) : null;
+    const isClaudeUi = panelRoot.dataset.conversationSystem === "claude_code";
     const isCurrentConversationPending =
       activeConversationKey !== null &&
       Number.isFinite(activeConversationKey) &&
       isRequestPending(activeConversationKey);
-    if (isCurrentConversationPending) {
-      if (sendBtn) sendBtn.style.display = "none";
-      if (cancelBtn) cancelBtn.style.display = "";
-      if (inputBox) inputBox.disabled = true;
-      return;
-    }
-    if (cancelBtn) cancelBtn.style.display = "none";
     if (sendBtn) {
-      sendBtn.style.display = "";
+      sendBtn.style.display = isCurrentConversationPending ? "none" : "";
       sendBtn.disabled = !item;
+      sendBtn.title = "Send";
     }
-    if (inputBox) inputBox.disabled = !item;
+    if (cancelBtn) {
+      cancelBtn.style.display = isCurrentConversationPending ? "" : "none";
+    }
+    if (inputBox) {
+      inputBox.disabled = isClaudeUi
+        ? !item
+        : isCurrentConversationPending
+          ? true
+          : !item;
+    }
+    renderQueuedClaudeInputs();
   };
 
   // buildUI() wipes body.textContent whenever onAsyncRender fires (item
@@ -10098,6 +10109,103 @@ export function setupHandlers(
     });
   }
 
+  type QueuedClaudeInput = {
+    id: number;
+    text: string;
+  };
+
+  let queuedClaudeInputSeq = 0;
+  let queuedClaudeInputs: QueuedClaudeInput[] = [];
+  let queuedClaudeDrainTimer: number | null = null;
+
+  renderQueuedClaudeInputs = () => {
+    if (!queueBar) return;
+    const isClaudeMode = panelRoot.dataset.conversationSystem === "claude_code";
+    if (!isClaudeMode || !queuedClaudeInputs.length) {
+      queueBar.textContent = "";
+      queueBar.style.display = "none";
+      return;
+    }
+
+    const ownerDoc = body.ownerDocument!;
+    queueBar.textContent = "";
+    queueBar.style.display = "flex";
+
+    const rail = ownerDoc.createElement("div") as HTMLDivElement;
+    rail.className = "llm-queued-input-rail";
+
+    const list = ownerDoc.createElement("div") as HTMLDivElement;
+    list.className = "llm-queued-input-list";
+    for (const entry of queuedClaudeInputs) {
+      const row = ownerDoc.createElement("div") as HTMLDivElement;
+      row.className = "llm-queued-input-item";
+
+      const text = ownerDoc.createElement("span") as HTMLSpanElement;
+      text.className = "llm-queued-input-chip";
+      text.textContent = entry.text;
+      text.title = entry.text;
+
+      const removeBtn = ownerDoc.createElement("button") as HTMLButtonElement;
+      removeBtn.type = "button";
+      removeBtn.className = "llm-queued-input-remove";
+      removeBtn.textContent = "×";
+      removeBtn.title = "Remove queued input";
+      removeBtn.setAttribute("aria-label", "Remove queued input");
+      removeBtn.addEventListener("click", (event: Event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        queuedClaudeInputs = queuedClaudeInputs.filter((item) => item.id !== entry.id);
+        renderQueuedClaudeInputs();
+      });
+
+      row.append(text, removeBtn);
+      list.appendChild(row);
+    }
+
+    rail.append(list);
+    queueBar.appendChild(rail);
+  };
+
+  scheduleClaudeQueueDrain = () => {
+    if (queuedClaudeDrainTimer !== null) return;
+    const win = body.ownerDocument?.defaultView;
+    if (!win) return;
+    queuedClaudeDrainTimer = win.setTimeout(() => {
+      queuedClaudeDrainTimer = null;
+      void drainQueuedClaudeInput();
+    }, 220) as unknown as number;
+  };
+
+  isClaudeQueueSendAvailable = () => {
+    const activeConversationKey = item ? getConversationKey(item) : null;
+    return Boolean(
+      isClaudeConversationSystem() &&
+        activeConversationKey !== null &&
+        isRequestPending(activeConversationKey),
+    );
+  };
+
+  queueClaudeInput = (text: string) => {
+    const normalized = text.trim();
+    if (!normalized) return;
+    queuedClaudeInputs.push({
+      id: ++queuedClaudeInputSeq,
+      text: normalized,
+    });
+    inputBox.value = "";
+    persistDraftInputForCurrentConversation();
+    renderQueuedClaudeInputs();
+    if (status) {
+      setStatus(
+        status,
+        queuedClaudeInputs.length === 1 ? t("Queued 1 follow-up") : t(`Queued ${queuedClaudeInputs.length} follow-ups`),
+        "ready",
+      );
+    }
+  };
+
+  syncRequestUiForCurrentConversation();
+
   const { doSend } = createSendFlowController({
     body,
     inputBox,
@@ -10334,7 +10442,10 @@ export function setupHandlers(
     },
     markNextWebChatSendAsNewChat,
   });
-  const executeSend = async () => {
+  const executeSend = async (options?: {
+    fromQueue?: boolean;
+    queuedText?: string;
+  }) => {
     // If the inline edit widget is active, route through editUserTurnAndRetry
     // instead of the normal send flow.
     if (inlineEditTarget && item) {
@@ -10600,6 +10711,13 @@ export function setupHandlers(
       }
       return;
     }
+    if (!options?.fromQueue && isClaudeQueueSendAvailable()) {
+      const queuedText = inputBox?.value?.trim() ?? "";
+      if (queuedText) {
+        queueClaudeInput(queuedText);
+        return;
+      }
+    }
     closeActionPicker();
     // Intercept command chip: if a command chip is active, route to action execution
     const chipAction = getActiveCommandAction();
@@ -10613,9 +10731,36 @@ export function setupHandlers(
       void handleInlineCommand(chipAction.name, params);
       return;
     }
-    await doSend();
+    await doSend(
+      options?.fromQueue && options.queuedText
+        ? {
+            overrideText: options.queuedText,
+            preserveInputDraft: true,
+          }
+        : undefined,
+    );
     persistDraftInputForCurrentConversation();
+    scheduleClaudeQueueDrain();
   };
+
+  async function drainQueuedClaudeInput(): Promise<void> {
+    if (!queuedClaudeInputs.length) {
+      renderQueuedClaudeInputs();
+      return;
+    }
+    const activeConversationKey = item ? getConversationKey(item) : null;
+    if (
+      !isClaudeConversationSystem() ||
+      activeConversationKey === null ||
+      isRequestPending(activeConversationKey)
+    ) {
+      return;
+    }
+    const next = queuedClaudeInputs.shift();
+    renderQueuedClaudeInputs();
+    if (!next) return;
+    await executeSend({ fromQueue: true, queuedText: next.text });
+  }
 
   // Send button - use addEventListener
   sendBtn.addEventListener("click", (e: Event) => {
