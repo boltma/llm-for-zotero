@@ -44,6 +44,7 @@ import {
 } from "../utils/llmClient";
 import { resetEmbeddingFailedFlags } from "./contextPanel/pdfContext";
 import { clearRetrievalCandidateCache } from "./contextPanel/multiContextPlanner";
+import { getAgentTraceExportPath } from "../agent/store/traceStore";
 import { joinLocalPath } from "../utils/localPath";
 import {
   isMineruEnabled,
@@ -73,6 +74,9 @@ import {
   getClaudePermissionModePref,
   getClaudeReasoningModePref,
   getClaudeRuntimeModelPref,
+  getConversationSystemPref,
+  getLastUsedClaudeGlobalConversationKey,
+  getLastUsedClaudePaperConversationKey,
   isClaudeCodeModeEnabled,
   setClaudeBridgeUrl,
   setClaudeCodeModeEnabled,
@@ -1787,6 +1791,18 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
   const claudeCodeReasoningSelect = doc.querySelector(
     `#${config.addonRef}-claude-code-reasoning`,
   ) as HTMLSelectElement | null;
+  const claudeConfigDocLink = doc.querySelector(
+    `#${config.addonRef}-claude-config-doc-link`,
+  ) as HTMLAnchorElement | null;
+  const claudeTraceEnabledInput = doc.querySelector(
+    `#${config.addonRef}-claude-trace-enabled`,
+  ) as HTMLInputElement | null;
+  const claudeTracePathEl = doc.querySelector(
+    `#${config.addonRef}-claude-trace-path`,
+  ) as HTMLDivElement | null;
+  const claudeTraceCopyBtn = doc.querySelector(
+    `#${config.addonRef}-claude-trace-copy-path`,
+  ) as HTMLButtonElement | null;
 
   if (enableAgentModeInput) {
     const prefValue = Zotero.Prefs.get(
@@ -1834,6 +1850,31 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
 
+  const copyTextToClipboard = async (text: string) => {
+    const value = text.trim();
+    if (!value) return;
+    const win = doc.defaultView;
+    if (win?.navigator?.clipboard?.writeText) {
+      try {
+        await win.navigator.clipboard.writeText(value);
+        return;
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      const helper = (globalThis as any).Components;
+      const svc = helper?.classes?.[
+        "@mozilla.org/widget/clipboardhelper;1"
+      ]?.getService?.(helper?.interfaces?.nsIClipboardHelper) as
+        | { copyString?: (v: string) => void }
+        | undefined;
+      svc?.copyString?.(value);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const ensureDirectory = async (dirPath: string) => {
     const IOUtils = (globalThis as any).IOUtils as
       | {
@@ -1853,6 +1894,19 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         });
       }
     }
+  };
+
+  const ensureFileIfMissing = async (filePath: string, content: string) => {
+    const IOUtils = (globalThis as any).IOUtils as
+      | {
+          exists?: (path: string) => Promise<boolean>;
+          write?: (path: string, data: Uint8Array<ArrayBufferLike>) => Promise<unknown>;
+        }
+      | undefined;
+    if (!IOUtils?.exists || !IOUtils?.write) return;
+    const exists = await IOUtils.exists(filePath).catch(() => false);
+    if (exists) return;
+    await IOUtils.write(filePath, new TextEncoder().encode(content));
   };
 
   const openDirectory = async (dirPath: string) => {
@@ -1886,6 +1940,49 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     }
   };
 
+  const getCurrentClaudeLocalDir = (): string => {
+    const env = getProcess()?.env;
+    const home =
+      env?.HOME?.trim() ||
+      env?.USERPROFILE?.trim() ||
+      getPathUtils()?.homeDir?.trim() ||
+      getOS()?.Constants?.Path?.homeDir?.trim() ||
+      getServices()?.dirsvc?.get?.("Home", getNsIFile())?.path?.trim() ||
+      (Zotero as unknown as { Profile?: { dir?: string } }).Profile?.dir?.trim() ||
+      ".";
+    const runtimeRoot = joinLocalPath(home, "Zotero", "agent-runtime");
+    const scopesRoot = joinLocalPath(runtimeRoot, "scopes");
+    const conversationSystem = getConversationSystemPref();
+    if (conversationSystem !== "claude_code") {
+      return scopesRoot;
+    }
+    const pane = Zotero.getMainWindow?.()?.LLMForZoteroPane;
+    const paneItem = pane?.item;
+    const libraryID = Number(paneItem?.libraryID);
+    const itemID = Number(paneItem?.id);
+    const isPaper = Number.isFinite(itemID) && itemID > 0;
+    const scope = isPaper ? "paper" : "open";
+    const scopeId = isPaper && Number.isFinite(libraryID) && libraryID > 0
+      ? `${Math.floor(libraryID)}:${Math.floor(itemID)}`
+      : `${Number.isFinite(libraryID) && libraryID > 0 ? Math.floor(libraryID) : 1}`;
+    const conversationKey = isPaper && Number.isFinite(libraryID) && libraryID > 0
+      ? getLastUsedClaudePaperConversationKey(Math.floor(libraryID), Math.floor(itemID))
+      : Number.isFinite(libraryID) && libraryID > 0
+        ? getLastUsedClaudeGlobalConversationKey(Math.floor(libraryID))
+        : null;
+    if (!conversationKey) {
+      return joinLocalPath(scopesRoot, scope, scopeId);
+    }
+    return joinLocalPath(
+      scopesRoot,
+      scope,
+      scopeId,
+      "conversations",
+      String(conversationKey),
+      ".claude",
+    );
+  };
+
   const renderClaudeConfigPaths = () => {
     if (!claudeConfigPathsWrap) return;
     claudeConfigPathsWrap.replaceChildren();
@@ -1900,7 +1997,6 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       "";
     const runtimeRoot = joinLocalPath(home || ".", "Zotero", "agent-runtime");
     const projectClaudeDir = joinLocalPath(runtimeRoot, ".claude");
-    const localScopesDir = joinLocalPath(runtimeRoot, "scopes");
     const localConversationDir = joinLocalPath(
       runtimeRoot,
       "scopes",
@@ -1926,7 +2022,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       {
         label: "Local",
         path: localConversationDir,
-        openPath: localScopesDir,
+        openPath: localConversationDir,
         description: "Each conversation stores its own override folder under the scopes tree.",
       },
     ];
@@ -1967,6 +2063,16 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       ) as HTMLButtonElement;
       openBtn.type = "button";
       openBtn.addEventListener("click", () => {
+        if (row.label === "Local") {
+          void (async () => {
+            const localDir = getCurrentClaudeLocalDir();
+            const localSettingsPath = joinLocalPath(localDir, "settings.local.json");
+            await ensureDirectory(localDir);
+            await ensureFileIfMissing(localSettingsPath, "{}\n");
+            await openDirectory(localDir);
+          })();
+          return;
+        }
         void openDirectory(row.openPath || row.path);
       });
       textWrap.append(label, description, path);
@@ -1988,6 +2094,36 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
     });
   }
   renderClaudeConfigPaths();
+
+  if (claudeConfigDocLink) {
+    claudeConfigDocLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      const launch = (Zotero as unknown as { launchURL?: (url: string) => void }).launchURL;
+      launch?.("https://code.claude.com/docs/en/settings");
+    });
+  }
+
+  if (claudeTracePathEl) {
+    claudeTracePathEl.textContent = getAgentTraceExportPath("latest-run").replace(/[\\/]latest-run\.json$/i, "");
+  }
+  if (claudeTraceEnabledInput) {
+    const raw = Zotero.Prefs.get(`${config.prefsPrefix}.agentTraceExportEnabled`, true);
+    claudeTraceEnabledInput.checked = raw === true || `${raw || ""}`.toLowerCase() === "true";
+    claudeTraceEnabledInput.addEventListener("change", () => {
+      Zotero.Prefs.set(
+        `${config.prefsPrefix}.agentTraceExportEnabled`,
+        claudeTraceEnabledInput.checked,
+        true,
+      );
+    });
+  }
+  if (claudeTraceCopyBtn) {
+    claudeTraceCopyBtn.addEventListener("click", () => {
+      void copyTextToClipboard(
+        getAgentTraceExportPath("latest-run").replace(/[\\/]latest-run\.json$/i, ""),
+      );
+    });
+  }
 
   if (agentPermissionModeSelect) {
     agentPermissionModeSelect.value = getClaudePermissionModePref();

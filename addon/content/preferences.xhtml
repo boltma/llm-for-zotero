@@ -356,6 +356,20 @@
                       <html:span><html:code>zotero-only</html:code> loads only Zotero-managed shared and per-conversation settings.</html:span>
                     </html:div>
                     <html:div id="__addonRef__-claude-config-paths" style="display: flex; flex-direction: column; gap: 8px; width: 100%;"></html:div>
+                    <html:div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 10px; border:1px solid var(--stroke-secondary, #c8c8c8); border-radius:8px; background: rgba(255,255,255,0.02);">
+                      <html:div style="display:flex; flex-direction:column; gap:2px; min-width:0;">
+                        <html:div style="font-size:11px; font-weight:600; color: var(--fill-secondary, #666);">Trace logs</html:div>
+                        <html:div style="font-size:10.5px; color: var(--fill-secondary, #666); line-height:1.45;">Save Claude runtime traces for debugging and copy the log directory path.</html:div>
+                        <html:div id="__addonRef__-claude-trace-path" style="font-size:11px; color: var(--fill-secondary, #666); word-break: break-all;"></html:div>
+                      </html:div>
+                      <html:div style="display:flex; align-items:center; gap:8px; flex:0 0 auto;">
+                        <html:label style="display:flex; align-items:center; gap:6px; font-size:11px; color: var(--fill-secondary, #666);">
+                          <html:input id="__addonRef__-claude-trace-enabled" type="checkbox" />
+                          Enabled
+                        </html:label>
+                        <html:button id="__addonRef__-claude-trace-copy-path" type="button" style="padding:4px 10px; font-size:11px; border:1px solid var(--stroke-secondary, #c8c8c8); border-radius:6px; background: Field; color: FieldText; cursor:pointer;">Copy path</html:button>
+                      </html:div>
+                    </html:div>
                     <html:a
                       id="__addonRef__-claude-config-doc-link"
                       href="https://code.claude.com/docs/en/settings"

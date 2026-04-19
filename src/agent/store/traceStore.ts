@@ -1,3 +1,4 @@
+import { config } from "../../../package.json";
 import { getClaudeRuntimeRootDir } from "../../claudeCode/projectSkills";
 import { getLocalParentPath, joinLocalPath } from "../../utils/localPath";
 import type {
@@ -11,6 +12,7 @@ const AGENT_RUNS_TABLE = "llm_for_zotero_agent_runs";
 const AGENT_RUN_EVENTS_TABLE = "llm_for_zotero_agent_run_events";
 const AGENT_RUN_EVENTS_INDEX = "llm_for_zotero_agent_run_events_run_idx";
 const AGENT_TRACE_EXPORT_DIR_NAME = "trace-debug";
+const AGENT_TRACE_EXPORT_PREF_KEY = `${config.prefsPrefix}.agentTraceExportEnabled`;
 
 const traceExportTimers = new Map<string, number>();
 const traceExportInFlight = new Map<string, Promise<void>>();
@@ -33,6 +35,15 @@ type OSFileLike = {
 
 function getIOUtils(): IOUtilsLike | undefined {
   return (globalThis as unknown as { IOUtils?: IOUtilsLike }).IOUtils;
+}
+
+function isAgentTraceExportEnabled(): boolean {
+  try {
+    const raw = Zotero.Prefs.get(AGENT_TRACE_EXPORT_PREF_KEY, true);
+    return raw === true || `${raw || ""}`.toLowerCase() === "true";
+  } catch {
+    return false;
+  }
 }
 
 function getOSFile(): OSFileLike | undefined {
@@ -126,6 +137,7 @@ async function exportAgentRunTrace(runId: string): Promise<void> {
 }
 
 function scheduleAgentRunTraceExport(runId: string, delayMs = 250): void {
+  if (!isAgentTraceExportEnabled()) return;
   const normalizedRunId = (runId || "").trim();
   if (!normalizedRunId) return;
   const existing = traceExportTimers.get(normalizedRunId);
