@@ -343,6 +343,7 @@ import {
 import { createSendFlowController } from "./setupHandlers/controllers/sendFlowController";
 import { createClearConversationController } from "./setupHandlers/controllers/clearConversationController";
 import { clearAllAgentToolCaches } from "../../agent/tools";
+import { renderShortcuts } from "./shortcuts";
 import { loadConversationHistoryScope } from "./historyLoader";
 import { loadClaudeConversationHistoryScope } from "../../claudeCode/historyLoader";
 import {
@@ -797,6 +798,11 @@ export function setupHandlers(
       warmClaudeModeCaches();
     }
     await ensureConversationLoaded(item as Zotero.Item);
+    const shortcutMode =
+      resolveDisplayConversationKind(item as Zotero.Item) === "global"
+        ? "library"
+        : "paper";
+    await renderShortcuts(body, item as Zotero.Item, shortcutMode);
     restoreDraftInputForCurrentConversation();
     refreshChatPreservingScroll();
     resetComposePreviewUI();

@@ -2819,6 +2819,7 @@ export function openStandaloneChat(options?: {
           currentPaperItem = paperItem;
           mountChatPanel(freshItem as Zotero.Item);
           void renderSidebar();
+          void renderShortcuts(contentArea, freshItem as Zotero.Item, "paper");
           updateStandaloneSystemToggle();
           return;
         }
@@ -2827,6 +2828,9 @@ export function openStandaloneChat(options?: {
         if (nextItem) {
           mountChatPanel(nextItem);
           void renderSidebar();
+          const shortcutMode =
+            resolveDisplayConversationKind(nextItem) === "global" ? "library" : "paper";
+          void renderShortcuts(contentArea, nextItem, shortcutMode);
         }
         updateStandaloneSystemToggle();
       };
