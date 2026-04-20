@@ -1,17 +1,14 @@
 import type { AgentRuntime } from "../agent/runtime";
 import type {
-  AgentConfirmationResolution,
   AgentEvent,
   AgentRuntimeOutcome,
   AgentRuntimeRequest,
-  AgentPendingAction,
 } from "../agent/types";
 import type {
   ClaudeConversationKind,
   ClaudeConversationSummary,
   ConversationSystem,
 } from "../shared/types";
-import type { ActionProgressEvent, ActionResult } from "../agent/actions/types";
 import {
   createExternalBackendBridgeRuntime,
   fetchExternalBridgeSessionInfo,
@@ -230,41 +227,6 @@ export async function listClaudeEfforts(
   return getClaudeBridgeRuntime(coreRuntime).listEfforts(model);
 }
 
-export async function refreshClaudeBridgeActions(
-  coreRuntime: AgentRuntime,
-  force = false,
-): Promise<void> {
-  await getClaudeBridgeRuntime(coreRuntime).refreshExternalActions(force);
-}
-
-export function listClaudeBridgeActions(
-  coreRuntime: AgentRuntime,
-): ClaudeBridgeActionDescriptor[] {
-  return getClaudeBridgeRuntime(coreRuntime).listExternalActionsSync();
-}
-
-export async function runClaudeBridgeAction(
-  coreRuntime: AgentRuntime,
-  name: string,
-  input: unknown,
-  opts?: {
-    conversationKey?: number;
-    libraryID?: number;
-    onProgress?: (event: ActionProgressEvent) => void;
-    requestConfirmation?: (
-      requestId: string,
-      action: AgentPendingAction,
-    ) => Promise<AgentConfirmationResolution>;
-  },
-): Promise<ActionResult<unknown>> {
-  return getClaudeBridgeRuntime(coreRuntime).runExternalAction(name, input, {
-    conversationKey: opts?.conversationKey,
-    libraryID: opts?.libraryID,
-    confirmationMode: "native_ui",
-    onProgress: opts?.onProgress,
-    requestConfirmation: opts?.requestConfirmation,
-  });
-}
 
 export async function runClaudeTurn(
   coreRuntime: AgentRuntime,

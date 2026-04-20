@@ -351,7 +351,6 @@ import {
   getSelectedClaudeRuntimeEntry,
   listClaudeEfforts,
   rememberClaudeConversationSelection,
-  refreshClaudeBridgeActions,
   resolveRememberedClaudeConversationKey,
   refreshClaudeSlashCommands,
   touchClaudeConversation,
@@ -729,7 +728,6 @@ export function setupHandlers(
     const coreRuntime = getCoreAgentRuntime();
     claudeWarmupInFlight = Promise.allSettled([
       refreshClaudeSlashCommands(coreRuntime, false),
-      refreshClaudeBridgeActions(coreRuntime, false),
       listClaudeEfforts(coreRuntime, getSelectedClaudeRuntimeEntry().model),
     ]).finally(() => {
       claudeWarmupInFlight = null;
