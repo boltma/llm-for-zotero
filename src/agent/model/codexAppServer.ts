@@ -2,6 +2,7 @@ import type {
   AgentModelCapabilities,
   AgentRuntimeRequest,
   AgentModelStep,
+  AgentToolCall,
 } from "../types";
 import type { AgentModelAdapter, AgentStepParams } from "./adapter";
 import {
@@ -24,7 +25,7 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
   getCapabilities(_request: AgentRuntimeRequest): AgentModelCapabilities {
     return {
       streaming: true,
-      toolCalls: false,
+      toolCalls: true,
       multimodal: isMultimodalRequestSupported(_request),
       fileInputs: false,
       reasoning: false,
@@ -32,9 +33,6 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
   }
 
   supportsTools(_request: AgentRuntimeRequest): boolean {
-    // AgentRuntime uses this as a coarse "can enter the agent loop" gate.
-    // The app-server transport does not expose local plugin tool calls, but it
-    // still needs to run turns through runStep() instead of forcing fallback.
     return true;
   }
 
@@ -44,36 +42,79 @@ export class CodexAppServerAdapter implements AgentModelAdapter {
     let text: string;
     try {
       text = await proc.runTurnExclusive(async () => {
-        if (!this.threadId) {
-          const threadResp = await proc.sendRequest("thread/start", {
-            model: request.model,
-            approvalPolicy: "never",
-          });
-          this.threadId = extractCodexAppServerThreadId(threadResp);
-          if (!this.threadId) {
-            throw new Error("Codex app-server did not return a thread ID");
-          }
-        }
-        const userInput = await extractLatestCodexAppServerUserInput(
-          params.messages,
+        const unregisterToolCallHandler = proc.onRequest(
+          "item/tool/call",
+          async (rawParams: unknown) => {
+            const notification = rawParams as {
+              callId?: unknown;
+              tool?: unknown;
+              arguments?: unknown;
+            };
+            const call: AgentToolCall = {
+              id:
+                typeof notification.callId === "string" &&
+                notification.callId.trim()
+                  ? notification.callId
+                  : `codex-app-server-${Date.now()}`,
+              name:
+                typeof notification.tool === "string"
+                  ? notification.tool
+                  : "unknown_tool",
+              arguments: notification.arguments,
+            };
+            if (!params.onToolCall) {
+              return {
+                contentItems: [
+                  {
+                    type: "inputText" as const,
+                    text: "Tool callbacks are unavailable for this request.",
+                  },
+                ],
+                success: false,
+              };
+            }
+            return params.onToolCall(call);
+          },
         );
+        try {
+          if (!this.threadId) {
+            const threadResp = await proc.sendRequest("thread/start", {
+              model: request.model,
+              approvalPolicy: "never",
+              dynamicTools: params.tools.map((tool) => ({
+                name: tool.name,
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+              })),
+            });
+            this.threadId = extractCodexAppServerThreadId(threadResp);
+            if (!this.threadId) {
+              throw new Error("Codex app-server did not return a thread ID");
+            }
+          }
+          const userInput = await extractLatestCodexAppServerUserInput(
+            params.messages,
+          );
 
-        const turnResp = await proc.sendRequest("turn/start", {
-          threadId: this.threadId,
-          input: userInput,
-        });
-        const turnId = extractCodexAppServerTurnId(turnResp);
-        if (!turnId) {
-          throw new Error("Codex app-server did not return a turn ID");
+          const turnResp = await proc.sendRequest("turn/start", {
+            threadId: this.threadId,
+            input: userInput,
+          });
+          const turnId = extractCodexAppServerTurnId(turnResp);
+          if (!turnId) {
+            throw new Error("Codex app-server did not return a turn ID");
+          }
+
+          return await waitForCodexAppServerTurnCompletion({
+            proc,
+            turnId,
+            onTextDelta: params.onTextDelta,
+            signal: params.signal,
+            cacheKey: this.processKey,
+          });
+        } finally {
+          unregisterToolCallHandler();
         }
-
-        return waitForCodexAppServerTurnCompletion({
-          proc,
-          turnId,
-          onTextDelta: params.onTextDelta,
-          signal: params.signal,
-          cacheKey: this.processKey,
-        });
       });
     } catch (error) {
       this.threadId = null;

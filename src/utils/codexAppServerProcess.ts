@@ -6,12 +6,14 @@ type PendingRequest = {
 };
 
 type NotificationHandler = (params: unknown) => void;
+type RequestHandler = (params: unknown, id: number) => unknown | Promise<unknown>;
 
 export class CodexAppServerProcess {
   private proc: unknown;
   private nextId = 1;
   private pendingRequests = new Map<number, PendingRequest>();
   private notificationHandlers = new Map<string, Set<NotificationHandler>>();
+  private requestHandlers = new Map<string, Set<RequestHandler>>();
   private readLoopPromise: Promise<void> | null = null;
   private turnQueue = Promise.resolve();
   private lineBuffer = "";
@@ -122,14 +124,50 @@ export class CodexAppServerProcess {
     if ("id" in msg && msg.id !== null && msg.id !== undefined) {
       const id = msg.id as number;
       const pending = this.pendingRequests.get(id);
-      if (!pending) return;
-      this.pendingRequests.delete(id);
-      if ("error" in msg) {
-        pending.reject(
-          new Error(String((msg.error as any)?.message ?? msg.error)),
-        );
-      } else {
-        pending.resolve(msg.result);
+      if (pending) {
+        this.pendingRequests.delete(id);
+        if ("error" in msg) {
+          pending.reject(
+            new Error(String((msg.error as any)?.message ?? msg.error)),
+          );
+        } else {
+          pending.resolve(msg.result);
+        }
+        return;
+      }
+
+      if (typeof msg.method === "string") {
+        const handlers = this.requestHandlers.get(msg.method);
+        if (!handlers?.size) {
+          this.writeRawMessage({
+            id,
+            error: {
+              code: -32601,
+              message: `No handler registered for ${msg.method}`,
+            },
+          });
+          return;
+        }
+        const handler = handlers.values().next().value as
+          | RequestHandler
+          | undefined;
+        if (!handler) return;
+        Promise.resolve()
+          .then(() => handler(msg.params, id))
+          .then((result) => {
+            this.writeRawMessage({ id, result });
+          })
+          .catch((error) => {
+            this.writeRawMessage({
+              id,
+              error: {
+                code: -32000,
+                message:
+                  error instanceof Error ? error.message : String(error),
+              },
+            });
+          });
+        return;
       }
     } else if (typeof msg.method === "string") {
       const handlers = this.notificationHandlers.get(msg.method);
@@ -152,9 +190,8 @@ export class CodexAppServerProcess {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pendingRequests.set(id, { resolve, reject });
-      const msg = JSON.stringify({ method, id, params }) + "\n";
       try {
-        (this.proc as any).stdin.write(msg);
+        this.writeRawMessage({ method, id, params });
       } catch (err) {
         this.pendingRequests.delete(id);
         reject(err);
@@ -164,9 +201,8 @@ export class CodexAppServerProcess {
 
   sendNotification(method: string, params?: unknown): void {
     if (this.destroyed) return;
-    const msg = JSON.stringify({ method, params }) + "\n";
     try {
-      (this.proc as any).stdin.write(msg);
+      this.writeRawMessage({ method, params });
     } catch {
       /* ignore if process is gone */
     }
@@ -202,11 +238,29 @@ export class CodexAppServerProcess {
     };
   }
 
+  onRequest(method: string, handler: RequestHandler): () => void {
+    let handlers = this.requestHandlers.get(method);
+    if (!handlers) {
+      handlers = new Set();
+      this.requestHandlers.set(method, handlers);
+    }
+    handlers.add(handler);
+    return () => {
+      this.requestHandlers.get(method)?.delete(handler);
+    };
+  }
+
   private async initialize(): Promise<void> {
     await this.sendRequest("initialize", {
       clientInfo: { name: "llm-for-zotero", version: "1.0" },
+      capabilities: { experimentalApi: true },
     });
     this.sendNotification("initialized");
+  }
+
+  private writeRawMessage(message: Record<string, unknown>): void {
+    const msg = JSON.stringify(message) + "\n";
+    (this.proc as any).stdin.write(msg);
   }
 
   destroy(): void {

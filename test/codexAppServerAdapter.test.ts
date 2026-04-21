@@ -17,12 +17,12 @@ describe("CodexAppServerAdapter", function () {
     };
   }
 
-  it("enters the agent runtime without advertising plugin tool calls", function () {
+  it("advertises tool-calling support for agent runtime requests", function () {
     const adapter = new CodexAppServerAdapter("codex_app_server");
     const request = makeRequest();
 
     assert.isTrue(adapter.supportsTools(request));
-    assert.isFalse(adapter.getCapabilities(request).toolCalls);
+    assert.isTrue(adapter.getCapabilities(request).toolCalls);
   });
 
   it("advertises multimodal support for non-text-only models", function () {

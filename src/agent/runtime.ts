@@ -18,6 +18,10 @@ import type {
   AgentToolResult,
 } from "./types";
 import type { AgentModelAdapter } from "./model/adapter";
+import type {
+  AgentAdapterToolCallResult,
+  AgentAdapterToolContentItem,
+} from "./model/adapter";
 import { resolveAgentLimits } from "./model/limits";
 import { classifyRequest } from "./model/requestClassifier";
 import { buildAgentInitialMessages } from "./model/messageBuilder";
@@ -148,6 +152,84 @@ type ToolWorkflowOutcome = {
   stopRun?: boolean;
   finalText?: string;
 };
+
+function stringifyToolDeliveryContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (content === null || content === undefined) {
+    return "";
+  }
+  try {
+    return JSON.stringify(content, null, 2);
+  } catch {
+    return String(content);
+  }
+}
+
+function pushAdapterTextItem(
+  target: AgentAdapterToolContentItem[],
+  text: string,
+): void {
+  if (!text) return;
+  target.push({ type: "inputText", text });
+}
+
+function pushAdapterMessageItems(
+  target: AgentAdapterToolContentItem[],
+  message: AgentModelMessage,
+): void {
+  if (typeof message.content === "string") {
+    pushAdapterTextItem(target, message.content);
+    return;
+  }
+  for (const part of message.content) {
+    if (part.type === "text") {
+      pushAdapterTextItem(target, part.text);
+      continue;
+    }
+    if (part.type === "image_url") {
+      target.push({
+        type: "inputImage",
+        imageUrl: part.image_url.url,
+      });
+      continue;
+    }
+    pushAdapterTextItem(target, `[Prepared file: ${part.file_ref.name}]`);
+  }
+}
+
+function buildAdapterToolCallResult(
+  outcome: ToolWorkflowOutcome,
+): AgentAdapterToolCallResult {
+  const contentItems: AgentAdapterToolContentItem[] = [];
+  if (outcome.delivery) {
+    pushAdapterTextItem(
+      contentItems,
+      stringifyToolDeliveryContent(outcome.delivery.content),
+    );
+    for (const followupMessage of outcome.delivery.followupMessages) {
+      pushAdapterMessageItems(contentItems, followupMessage);
+    }
+  } else if (outcome.finalText) {
+    pushAdapterTextItem(contentItems, outcome.finalText);
+  } else {
+    pushAdapterTextItem(
+      contentItems,
+      stringifyToolDeliveryContent(outcome.toolResult.content),
+    );
+  }
+  if (!contentItems.length) {
+    pushAdapterTextItem(
+      contentItems,
+      outcome.toolResult.ok ? "Tool completed successfully." : "Tool failed.",
+    );
+  }
+  return {
+    contentItems,
+    success: outcome.toolResult.ok,
+  };
+}
 
 type ExecutedToolCall = {
   toolResult: AgentToolResult;
@@ -440,6 +522,12 @@ export class AgentRuntime {
             summary: reasoning.summary,
             details: reasoning.details,
           });
+        },
+        onToolCall: async (call) => {
+          const outcome = await executeToolWorkflow(call, round, {
+            modelCallId: call.id,
+          });
+          return buildAdapterToolCallResult(outcome);
         },
       });
       await flushStepDelta();

@@ -78,4 +78,56 @@ describe("codexAppServerProcess", function () {
 
     assert.isTrue(killed);
   });
+
+  it("responds to server-initiated JSON-RPC requests via registered handlers", async function () {
+    const writes: string[] = [];
+    const ProcCtor = CodexAppServerProcess as unknown as {
+      new (proc: unknown): CodexAppServerProcess;
+    };
+    const proc = new ProcCtor({
+      stdin: {
+        write: (chunk: string) => {
+          writes.push(chunk);
+        },
+      },
+      kill: () => {},
+    });
+
+    proc.onRequest("item/tool/call", async (params) => {
+      assert.deepEqual(params, {
+        callId: "call-1",
+        tool: "query_library",
+        arguments: { query: "transformers" },
+      });
+      return {
+        contentItems: [{ type: "inputText", text: "done" }],
+        success: true,
+      };
+    });
+
+    await (proc as unknown as {
+      handleMessage: (msg: Record<string, unknown>) => void;
+    }).handleMessage({
+      id: 7,
+      method: "item/tool/call",
+      params: {
+        callId: "call-1",
+        tool: "query_library",
+        arguments: { query: "transformers" },
+      },
+    });
+
+    await Promise.resolve();
+
+    assert.deepEqual(
+      JSON.parse(writes[0] || "{}"),
+      {
+        id: 7,
+        result: {
+          contentItems: [{ type: "inputText", text: "done" }],
+          success: true,
+        },
+      },
+    );
+  });
 });
