@@ -2316,6 +2316,21 @@ function isGenericAgentStatusText(text: string): boolean {
   );
 }
 
+function isHiddenClaudeStartupStatus(text: string): boolean {
+  return (
+    text === "Checking the request against the attached context." ||
+    text === "Request and attached context received" ||
+    text === "Reused previous context" ||
+    text === "Detected updated context" ||
+    text === "Initializing Claude session" ||
+    text === "Rebuilding Claude session after runtime change" ||
+    text === "Session signature mismatch detected. Retrying with a fresh Claude session." ||
+    text === "Claude runtime changed. Rebuilding this conversation on the new runtime while keeping local context." ||
+    /^Claude bridge URL:/i.test(text) ||
+    text === "Claude bridge URL is empty. Falling back to local runtime."
+  );
+}
+
 function buildInitialAgentMessage(requestChips: AgentTraceChip[]): string {
   return requestChips.length
     ? "Checking the request against the attached context."
@@ -2387,22 +2402,6 @@ export function buildAgentTraceDisplayItems(
   let announcedWriting = false;
   let lastMeaningfulStatus: string | null = null;
   let reasoningStep = 1;
-  const sawSessionResume = events.some((entry) => {
-    const record = entry as unknown as {
-      eventType?: unknown;
-      payload?: { providerType?: unknown; payload?: unknown };
-    };
-    if (record.eventType !== "provider_event") return false;
-    if (!isAgentTraceRecord(record.payload)) return false;
-    if (record.payload.providerType !== "system") return false;
-    const providerPayload = isAgentTraceRecord(record.payload.payload)
-      ? record.payload.payload
-      : null;
-    return (
-      providerPayload?.subtype === "hook_started" &&
-      providerPayload?.hook_name === "SessionStart:resume"
-    );
-  });
 
   items.push({
     type: "message",
@@ -2441,10 +2440,10 @@ export function buildAgentTraceDisplayItems(
         if (isSessionStartStatus) {
           break;
         }
-        if (statusText === "Initializing Claude session" && !sawSessionResume) {
+        if (statusText === "Compacting context…") {
           break;
         }
-        if (statusText === "Compacting context…") {
+        if (isHiddenClaudeStartupStatus(statusText)) {
           break;
         }
         lastMeaningfulStatus = statusText;

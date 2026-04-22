@@ -1825,16 +1825,8 @@ export function createExternalBackendBridgeRuntime(options: {
     runTurn: async (params: RunTurnParams): Promise<AgentRuntimeOutcome> => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
       if (!bridgeUrl) {
-        await params.onEvent?.({
-          type: "status",
-          text: "Claude bridge URL is empty. Falling back to local runtime.",
-        });
         return coreRuntime.runTurn(params);
       }
-      await params.onEvent?.({
-        type: "status",
-        text: `Claude bridge URL: ${bridgeUrl}`,
-      });
       let persistedRunId = "";
       let persistedRunCreated = false;
       let persistedSeq = 0;
@@ -1888,17 +1880,7 @@ export function createExternalBackendBridgeRuntime(options: {
       }
       conversationScopeByKey.set(params.request.conversationKey, scope);
       const currentSignature = signatureForContextEnvelope(contextEnvelope);
-      const previousSignature = conversationContextSignature.get(
-        params.request.conversationKey,
-      );
-      const contextStatus =
-        previousSignature && previousSignature === currentSignature
-          ? "Reused previous context"
-          : "Detected updated context";
       conversationContextSignature.set(params.request.conversationKey, currentSignature);
-      const preStatusEvent: AgentEvent = { type: "status", text: contextStatus };
-      await appendPersistedEvent(preStatusEvent);
-      await params.onEvent?.(preStatusEvent);
       try {
         const outcome = await runExternalBridgeTurn(bridgeUrl, {
           ...params,
