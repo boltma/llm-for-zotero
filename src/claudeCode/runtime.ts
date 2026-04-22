@@ -22,6 +22,7 @@ import {
 } from "./state";
 import {
   appendClaudeMessage,
+  clearClaudeConversationSessionMetadata,
   createClaudeGlobalConversation,
   createClaudePaperConversation,
   deleteClaudeTurnMessages as deleteClaudeConversationTurnMessagesStore,
@@ -191,6 +192,11 @@ export function getRememberedClaudeConversationScope(
   return conversationScopeCache.get(Math.floor(conversationKey)) || null;
 }
 
+export function forgetClaudeConversationScope(conversationKey: number): void {
+  if (!Number.isFinite(conversationKey) || conversationKey <= 0) return;
+  conversationScopeCache.delete(Math.floor(conversationKey));
+}
+
 export function resetClaudeBridgeRuntime(): void {
   bridgeRuntimeCache = null;
   bridgeRuntimeCoreRef = null;
@@ -256,6 +262,25 @@ export async function updateClaudeRuntimeRetention(
     scope: params.scope || undefined,
     mountId: params.mountId,
     retain: params.retain,
+  });
+}
+
+export async function invalidateClaudeConversationSession(
+  coreRuntime: AgentRuntime,
+  params: {
+    conversationKey: number;
+    scope?: ClaudeBridgeScope | null;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  const bridgeUrl = getBridgeUrl();
+  forgetClaudeConversationScope(params.conversationKey);
+  await clearClaudeConversationSessionMetadata(params.conversationKey);
+  if (!bridgeUrl.trim()) return;
+  await getClaudeBridgeRuntime(coreRuntime).invalidateSession({
+    conversationKey: params.conversationKey,
+    scope: params.scope || undefined,
+    metadata: params.metadata,
   });
 }
 
@@ -369,20 +394,21 @@ export async function deleteClaudeConversationTurnMessages(
 export async function touchClaudeConversation(
   conversationKey: number,
   updates: {
-    title?: string;
+    title?: string | null;
     updatedAt?: number;
-    providerSessionId?: string;
-    scopedConversationKey?: string;
-    scopeType?: string;
-    scopeId?: string;
-    scopeLabel?: string;
-    cwd?: string;
-    model?: string;
-    effort?: string;
+    providerSessionId?: string | null;
+    scopedConversationKey?: string | null;
+    scopeType?: string | null;
+    scopeId?: string | null;
+    scopeLabel?: string | null;
+    cwd?: string | null;
+    model?: string | null;
+    effort?: string | null;
   },
 ): Promise<void> {
   const summary = await getClaudeConversationSummary(conversationKey);
   if (!summary) return;
+  const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(updates, key);
   await upsertClaudeConversationSummary({
     conversationKey: summary.conversationKey,
     libraryID: summary.libraryID,
@@ -390,16 +416,19 @@ export async function touchClaudeConversation(
     paperItemID: summary.paperItemID,
     createdAt: summary.createdAt,
     updatedAt: updates.updatedAt || Date.now(),
-    title: updates.title || summary.title,
-    providerSessionId: updates.providerSessionId || summary.providerSessionId,
-    scopedConversationKey:
-      updates.scopedConversationKey || summary.scopedConversationKey,
-    scopeType: updates.scopeType || summary.scopeType,
-    scopeId: updates.scopeId || summary.scopeId,
-    scopeLabel: updates.scopeLabel || summary.scopeLabel,
-    cwd: updates.cwd || summary.cwd,
-    model: updates.model || summary.model,
-    effort: updates.effort || summary.effort,
+    title: hasOwn("title") ? updates.title || undefined : summary.title,
+    providerSessionId: hasOwn("providerSessionId")
+      ? updates.providerSessionId || undefined
+      : summary.providerSessionId,
+    scopedConversationKey: hasOwn("scopedConversationKey")
+      ? updates.scopedConversationKey || undefined
+      : summary.scopedConversationKey,
+    scopeType: hasOwn("scopeType") ? updates.scopeType || undefined : summary.scopeType,
+    scopeId: hasOwn("scopeId") ? updates.scopeId || undefined : summary.scopeId,
+    scopeLabel: hasOwn("scopeLabel") ? updates.scopeLabel || undefined : summary.scopeLabel,
+    cwd: hasOwn("cwd") ? updates.cwd || undefined : summary.cwd,
+    model: hasOwn("model") ? updates.model || undefined : summary.model,
+    effort: hasOwn("effort") ? updates.effort || undefined : summary.effort,
   });
 }
 

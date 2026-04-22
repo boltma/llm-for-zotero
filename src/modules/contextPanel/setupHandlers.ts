@@ -348,8 +348,10 @@ import { loadConversationHistoryScope } from "./historyLoader";
 import { loadClaudeConversationHistoryScope } from "../../claudeCode/historyLoader";
 import {
   buildClaudeReasoningConfig,
+  buildClaudeScope,
   getClaudeRuntimeModelEntries,
   getSelectedClaudeRuntimeEntry,
+  invalidateClaudeConversationSession,
   listClaudeEfforts,
   rememberClaudeConversationSelection,
   resolveRememberedClaudeConversationKey,
@@ -4791,6 +4793,45 @@ export function setupHandlers(
     clearConversationSummaryFromCache(conversationKey);
   };
 
+  const invalidateClaudeConversationForDeletion = async (
+    conversationKey: number,
+    summary?: {
+      libraryID?: number;
+      kind?: "global" | "paper";
+      paperItemID?: number;
+      scopeType?: string;
+      scopeId?: string;
+      scopeLabel?: string;
+    } | null,
+  ): Promise<void> => {
+    if (!isClaudeConversationSystem()) return;
+    const libraryID = Number(summary?.libraryID || 0);
+    const kind = summary?.kind;
+    if (!Number.isFinite(libraryID) || libraryID <= 0 || !kind) {
+      return;
+    }
+    const scope =
+      summary?.scopeType === "paper" || summary?.scopeType === "open"
+        ? {
+            scopeType: summary.scopeType as "paper" | "open",
+            scopeId: String(summary.scopeId || ""),
+            scopeLabel:
+              typeof summary.scopeLabel === "string" && summary.scopeLabel.trim()
+                ? summary.scopeLabel.trim()
+                : undefined,
+          }
+        : buildClaudeScope({
+            libraryID: Math.floor(libraryID),
+            kind,
+            paperItemID:
+              kind === "paper" ? Number(summary?.paperItemID || 0) || undefined : undefined,
+          });
+    await invalidateClaudeConversationSession(getCoreAgentRuntime(), {
+      conversationKey,
+      scope,
+    });
+  };
+
   const finalizeGlobalConversationDeletion = async (
     pending: PendingHistoryDeletion,
   ): Promise<void> => {
@@ -4835,6 +4876,20 @@ export function setupHandlers(
     }
     clearPendingDeletionCaches(conversationKey);
     let hasError = false;
+    if (isClaudeConversationSystem()) {
+      try {
+        await invalidateClaudeConversationForDeletion(conversationKey, {
+          libraryID: pending.libraryID,
+          kind: "global",
+          scopeType: "open",
+          scopeId: String(Math.floor(pending.libraryID)),
+          scopeLabel: "Open Chat",
+        });
+      } catch (err) {
+        hasError = true;
+        ztoolkit.log("LLM: Failed to invalidate deleted Claude global conversation", err);
+      }
+    }
     try {
       if (isClaudeConversationSystem()) {
         await clearClaudeConversation(conversationKey);
@@ -4948,6 +5003,18 @@ export function setupHandlers(
     }
     clearPendingDeletionCaches(conversationKey);
     let hasError = false;
+    if (isClaudeConversationSystem()) {
+      try {
+        await invalidateClaudeConversationForDeletion(conversationKey, {
+          libraryID: pending.libraryID,
+          kind: "paper",
+          paperItemID,
+        });
+      } catch (err) {
+        hasError = true;
+        ztoolkit.log("LLM: Failed to invalidate deleted Claude paper conversation", err);
+      }
+    }
     try {
       if (isClaudeConversationSystem()) {
         await clearClaudeConversation(conversationKey);
@@ -10474,6 +10541,36 @@ export function setupHandlers(
     },
     markConversationLoaded: (conversationKey) => {
       loadedConversationKeys.add(conversationKey);
+    },
+    invalidateConversationSession: async (conversationKey) => {
+      if (!isClaudeConversationSystem() || !item) return;
+      const libraryID = Number(item.libraryID || 0);
+      const currentKind = resolveDisplayConversationKind(item);
+      const baseItem = resolveConversationBaseItem(item);
+      if (!Number.isFinite(libraryID) || libraryID <= 0 || !currentKind) return;
+      const scope = buildClaudeScope({
+        libraryID: Math.floor(libraryID),
+        kind: currentKind,
+        paperItemID:
+          currentKind === "paper" ? Number(baseItem?.id || 0) || undefined : undefined,
+        paperTitle:
+          currentKind === "paper"
+            ? String(baseItem?.getField?.("title") || "").trim() || undefined
+            : undefined,
+      });
+      await invalidateClaudeConversationSession(getCoreAgentRuntime(), {
+        conversationKey,
+        scope,
+      });
+      void touchClaudeConversation(conversationKey, {
+        providerSessionId: undefined,
+        scopedConversationKey: undefined,
+        scopeType: undefined,
+        scopeId: undefined,
+        scopeLabel: undefined,
+        cwd: undefined,
+        updatedAt: Date.now(),
+      });
     },
     clearStoredConversation: (conversationKey) =>
       isClaudeConversationSystem()

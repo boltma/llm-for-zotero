@@ -8,6 +8,7 @@ type ClearConversationControllerDeps = {
   resetComposePreviewUI: () => void;
   resetConversationHistory: (conversationKey: number) => void;
   markConversationLoaded: (conversationKey: number) => void;
+  invalidateConversationSession?: (conversationKey: number) => Promise<void>;
   clearStoredConversation: (conversationKey: number) => Promise<void>;
   resetConversationTitle: (conversationKey: number) => Promise<void>;
   clearOwnerAttachmentRefs: (
@@ -53,6 +54,11 @@ export function createClearConversationController(
     deps.clearAgentToolCaches?.(normalizedConversationKey);
     deps.resetComposePreviewUI();
 
+    try {
+      await deps.invalidateConversationSession?.(normalizedConversationKey);
+    } catch (err) {
+      deps.logError?.("LLM: Failed to invalidate Claude conversation session", err);
+    }
     try {
       await deps.clearStoredConversation(normalizedConversationKey);
     } catch (err) {

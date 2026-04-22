@@ -82,6 +82,11 @@ export type AgentRuntimeLike = Pick<
     mountId: string;
     retain: boolean;
   }): Promise<RuntimeRetentionResponse | null>;
+  invalidateSession(params: {
+    conversationKey: number;
+    scope?: BridgeScope;
+    metadata?: Record<string, unknown>;
+  }): Promise<SessionInvalidationResponse | null>;
   runExternalAction(
     name: string,
     input: unknown,
@@ -133,6 +138,12 @@ type RuntimeRetentionResponse = {
   originalConversationKey: string;
   scopedConversationKey: string;
   retained: boolean;
+};
+
+type SessionInvalidationResponse = {
+  originalConversationKey: string;
+  scopedConversationKey: string;
+  invalidated: boolean;
 };
 
 const EXTERNAL_ACTION_PREFIX = "cc_tool::";
@@ -353,6 +364,12 @@ function rememberLastRunBridgeContext(
   });
 }
 
+function clearLastRunBridgeContext(conversationKey: number): void {
+  const normalizedConversationKey = Math.floor(conversationKey);
+  if (!Number.isFinite(normalizedConversationKey)) return;
+  lastRunBridgeContextByConversationKey.delete(normalizedConversationKey);
+}
+
 function getClaudeConfigSourcePref(): "default" | "user-only" | "zotero-only" {
   try {
     const raw = String(
@@ -563,6 +580,31 @@ async function updateExternalRuntimeRetention(params: {
     throw new Error(`Bridge HTTP ${response.status}`);
   }
   return (await response.json()) as unknown as RuntimeRetentionResponse;
+}
+
+async function invalidateExternalBridgeSession(params: {
+  baseUrl: string;
+  conversationKey: number;
+  scope?: BridgeScope;
+  metadata?: Record<string, unknown>;
+}): Promise<SessionInvalidationResponse | null> {
+  const normalized = normalizeBaseUrl(params.baseUrl);
+  if (!normalized) return null;
+  const response = await fetch(`${normalized}/invalidate-session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      conversationKey: params.conversationKey,
+      scopeType: params.scope?.scopeType,
+      scopeId: params.scope?.scopeId,
+      scopeLabel: params.scope?.scopeLabel,
+      metadata: params.metadata,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Bridge HTTP ${response.status}`);
+  }
+  return (await response.json()) as unknown as SessionInvalidationResponse;
 }
 
 function toExternalActionName(toolName: string): string {
@@ -1292,20 +1334,6 @@ export async function fetchExternalBridgeSessionInfo(params: {
     candidates.push(candidate);
   };
 
-  if (cached?.scope?.scopeType && cached.scope.scopeId) {
-    pushCandidate({
-      scopeType: cached.scope.scopeType,
-      scopeId: cached.scope.scopeId,
-      scopeLabel: cached.scope.scopeLabel,
-      source: "last_run_snapshot",
-    });
-    pushCandidate({
-      scopeType: cached.scope.scopeType,
-      scopeId: cached.scope.scopeId,
-      source: "scope_no_label",
-    });
-  }
-
   if (params.scopeType && params.scopeId) {
     pushCandidate({
       scopeType: params.scopeType,
@@ -1316,6 +1344,20 @@ export async function fetchExternalBridgeSessionInfo(params: {
     pushCandidate({
       scopeType: params.scopeType,
       scopeId: params.scopeId,
+      source: "scope_no_label",
+    });
+  }
+
+  if (cached?.scope?.scopeType && cached.scope.scopeId) {
+    pushCandidate({
+      scopeType: cached.scope.scopeType,
+      scopeId: cached.scope.scopeId,
+      scopeLabel: cached.scope.scopeLabel,
+      source: "last_run_snapshot",
+    });
+    pushCandidate({
+      scopeType: cached.scope.scopeType,
+      scopeId: cached.scope.scopeId,
       source: "scope_no_label",
     });
   }
@@ -1672,6 +1714,24 @@ export function createExternalBackendBridgeRuntime(options: {
         mountId,
         retain,
       });
+    },
+    invalidateSession: async ({ conversationKey, scope, metadata }) => {
+      const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
+      if (!bridgeUrl || !isClaudeBridgeActive()) {
+        clearLastRunBridgeContext(conversationKey);
+        conversationScopeByKey.delete(conversationKey);
+        return null;
+      }
+      const outcome = await invalidateExternalBridgeSession({
+        baseUrl: bridgeUrl,
+        conversationKey,
+        scope,
+        metadata,
+      });
+      clearLastRunBridgeContext(conversationKey);
+      conversationScopeByKey.delete(conversationKey);
+      conversationContextSignature.delete(conversationKey);
+      return outcome;
     },
     runExternalAction: async (name, input, opts = {}) => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());

@@ -1116,6 +1116,25 @@ export async function touchClaudeConversationTitle(
   );
 }
 
+export async function clearClaudeConversationSessionMetadata(
+  conversationKey: number,
+): Promise<void> {
+  const normalizedKey = normalizeConversationKey(conversationKey);
+  if (!normalizedKey) return;
+  await Zotero.DB.queryAsync(
+    `UPDATE ${CLAUDE_CONVERSATIONS_TABLE}
+     SET provider_session_id = NULL,
+         scoped_conversation_key = NULL,
+         scope_type = NULL,
+         scope_id = NULL,
+         scope_label = NULL,
+         cwd = NULL,
+         updated_at = ?
+     WHERE conversation_key = ?`,
+    [Date.now(), normalizedKey],
+  );
+}
+
 export async function setClaudeConversationTitle(
   conversationKey: number,
   titleSeed: string,
