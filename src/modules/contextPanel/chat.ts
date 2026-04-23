@@ -23,6 +23,7 @@ import {
   checkEmbeddingAvailability,
 } from "../../utils/llmClient";
 import { estimateConversationTokens } from "../../utils/modelInputCap";
+import { formatDisplayModelName } from "../../utils/modelDisplayLabel";
 import type { ProviderProtocol } from "../../utils/providerProtocol";
 import {
   PERSISTED_HISTORY_LIMIT,
@@ -948,25 +949,6 @@ export function detectReasoningProvider(
   if (name.includes("gemini")) return "gemini";
   if (/^(gpt-5|o\d)(\b|[.-])/.test(name)) return "openai";
   return "unsupported";
-}
-
-function formatDisplayModelName(
-  modelName: string | undefined,
-  modelProviderLabel: string | undefined,
-): string {
-  const normalizedModel = (modelName || "").trim();
-  if (!normalizedModel) return "";
-  const provider = (modelProviderLabel || "").trim().toLowerCase();
-  if (provider.includes("(codex auth)")) {
-    return `codex/${normalizedModel}`;
-  }
-  if (provider.includes("(app server)")) {
-    return `codex-app/${normalizedModel}`;
-  }
-  if (provider.includes("(copilot auth)")) {
-    return `copilot/${normalizedModel}`;
-  }
-  return normalizedModel;
 }
 
 export function getReasoningOptions(

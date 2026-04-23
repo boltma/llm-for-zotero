@@ -82,8 +82,16 @@ const setPref = (key: PrefKey, value: string) =>
 
 const CUSTOMIZED_API_HELPER_TEXT =
   "Choose a preset above, or switch to Customized to enter a full base URL or endpoint manually.";
-const CODEX_API_HELPER_TEXT =
-  "codex auth usually uses https://chatgpt.com/backend-api/codex/responses";
+const LEGACY_CODEX_AUTH_HELPER_TEXT =
+  "Legacy direct ChatGPT/Codex backend mode. Existing users can keep using it in this release. New users should use Codex App Server. Planned for deprecation in a future release after app-server validation.";
+const CODEX_APP_SERVER_HELPER_TEXT =
+  "Recommended official Codex integration. Runs the local `codex app-server` CLI and routes turns through it. Run `codex login` first.";
+const LEGACY_CODEX_API_HELPER_TEXT =
+  "Legacy direct backend URL. Usually uses https://chatgpt.com/backend-api/codex/responses. Existing users can keep it in this release, but new users should use Codex App Server. Planned for deprecation in a future release after app-server validation.";
+const CODEX_APP_SERVER_PROTOCOL_HELPER_TEXT =
+  "Uses Codex responses with the local codex app-server transport.";
+const LEGACY_CODEX_AUTH_PROTOCOL_HELPER_TEXT =
+  "Uses Codex responses with the legacy direct backend transport.";
 const COPILOT_API_HELPER_TEXT =
   "GitHub Copilot uses device-based login. Click Login to authenticate via GitHub.";
 const DEFAULT_COPILOT_API_BASE = "https://api.githubcopilot.com";
@@ -177,6 +185,19 @@ function resolveSelectedProtocol(
     fallback,
   });
   return allowed.includes(normalized) ? normalized : allowed[0];
+}
+
+function getProtocolHelperText(
+  group: ModelProviderGroup,
+  protocol: ProviderProtocol,
+): string {
+  if (group.authMode === "codex_app_server") {
+    return t(CODEX_APP_SERVER_PROTOCOL_HELPER_TEXT);
+  }
+  if (group.authMode === "codex_auth") {
+    return t(LEGACY_CODEX_AUTH_PROTOCOL_HELPER_TEXT);
+  }
+  return getProviderProtocolSpec(protocol).helperText;
 }
 
 // ── DOM helpers ────────────────────────────────────────────────────
@@ -706,12 +727,12 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       const apiKeyOption = el(doc, "option") as HTMLOptionElement;
       apiKeyOption.value = "api_key";
       apiKeyOption.textContent = t("API Key");
-      const codexOption = el(doc, "option") as HTMLOptionElement;
-      codexOption.value = "codex_auth";
-      codexOption.textContent = t("Codex Auth");
       const codexAppServerOption = el(doc, "option") as HTMLOptionElement;
       codexAppServerOption.value = "codex_app_server";
       codexAppServerOption.textContent = t("Codex App Server");
+      const codexOption = el(doc, "option") as HTMLOptionElement;
+      codexOption.value = "codex_auth";
+      codexOption.textContent = t("Codex Auth (Legacy)");
       const copilotOption = el(doc, "option") as HTMLOptionElement;
       copilotOption.value = "copilot_auth";
       copilotOption.textContent = t("GitHub Copilot");
@@ -721,8 +742,8 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
       webchatOption.textContent = t("WebChat");
       authModeSelect.append(
         apiKeyOption,
-        codexOption,
         codexAppServerOption,
+        codexOption,
         copilotOption,
         webchatOption,
       );
@@ -770,9 +791,9 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           : group.authMode === "copilot_auth"
             ? t(COPILOT_API_HELPER_TEXT)
             : group.authMode === "codex_auth"
-              ? t("codex auth reuses local `codex login` credentials from ~/.codex/auth.json")
+              ? t(LEGACY_CODEX_AUTH_HELPER_TEXT)
               : group.authMode === "codex_app_server"
-                ? t("App Server mode spawns the local codex CLI and routes turns through it. Run `codex login` first.")
+                ? t(CODEX_APP_SERVER_HELPER_TEXT)
                 : "";
       authModeWrap.append(
         authModeLabel,
@@ -900,7 +921,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
           doc,
           "span",
           HELPER_STYLE,
-          getProviderProtocolSpec(group.providerProtocol).helperText,
+          getProtocolHelperText(group, group.providerProtocol),
         ),
       );
 
@@ -945,7 +966,7 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         "span",
         HELPER_STYLE,
         group.authMode === "codex_auth"
-          ? t(CODEX_API_HELPER_TEXT)
+          ? t(LEGACY_CODEX_API_HELPER_TEXT)
           : group.authMode === "codex_app_server"
             ? t("Transport is handled by the codex subprocess; no API URL is needed.")
             : group.authMode === "copilot_auth"
@@ -1708,6 +1729,14 @@ export async function registerPrefsScripts(_window: Window | undefined | null) {
         cardBody.append(
           authModeWrap,
           copilotLoginWrap,
+          protocolWrap,
+          apiUrlWrap,
+          divider,
+          modelsWrap,
+        );
+      } else if (group.authMode === "codex_app_server") {
+        cardBody.append(
+          authModeWrap,
           protocolWrap,
           apiUrlWrap,
           divider,

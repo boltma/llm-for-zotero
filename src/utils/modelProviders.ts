@@ -516,7 +516,7 @@ export function getRuntimeModelEntries(): RuntimeModelEntry[] {
       authMode === "webchat"
         ? `${baseProviderLabel} (web)`
         : authMode === "codex_auth"
-          ? `${baseProviderLabel} (codex auth)`
+          ? `${baseProviderLabel} (codex auth, legacy)`
           : authMode === "codex_app_server"
             ? `${baseProviderLabel} (app server)`
             : authMode === "copilot_auth"
