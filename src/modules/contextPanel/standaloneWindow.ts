@@ -70,6 +70,7 @@ import {
 } from "../../claudeCode/constants";
 import {
   resolveRememberedClaudeConversationKey,
+  invalidateAllClaudeHotRuntimes,
   refreshClaudeSlashCommands,
 } from "../../claudeCode/runtime";
 import {
@@ -3160,6 +3161,9 @@ export function openStandaloneChat(options?: {
           }
           if (!getClaudeCodeModeEnabled()) {
             void releaseClaudeRuntimeForBody(contentArea as Element);
+            void invalidateAllClaudeHotRuntimes(getCoreAgentRuntime()).catch((err) => {
+              ztoolkit.log("LLM: Failed to invalidate all Claude hot runtimes", err);
+            });
             setConversationSystemPref("upstream");
             if (isClaudeConversationSystem()) {
               void switchConversationSystem("upstream");

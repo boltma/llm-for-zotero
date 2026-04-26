@@ -363,6 +363,7 @@ import {
   buildClaudeScope,
   getClaudeRuntimeModelEntries,
   getSelectedClaudeRuntimeEntry,
+  invalidateAllClaudeHotRuntimes,
   invalidateClaudeConversationSession,
   listClaudeEfforts,
   rememberClaudeConversationSelection,
@@ -1172,6 +1173,9 @@ export function setupHandlers(
       }
       if (!getClaudeCodeModeEnabled()) {
         void releaseClaudeRuntimeForBody(body);
+        void invalidateAllClaudeHotRuntimes(getCoreAgentRuntime()).catch((err: unknown) => {
+          ztoolkit.log("LLM: Failed to invalidate all Claude hot runtimes", err);
+        });
         setConversationSystemPref("upstream");
         if (isClaudeConversationSystem()) {
           void switchConversationSystem("upstream");

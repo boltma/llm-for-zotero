@@ -89,6 +89,7 @@ export type AgentRuntimeLike = Pick<
     scope?: BridgeScope;
     metadata?: Record<string, unknown>;
   }): Promise<SessionInvalidationResponse | null>;
+  invalidateAllHotRuntimes(): Promise<{ invalidated: boolean } | null>;
   runExternalAction(
     name: string,
     input: unknown,
@@ -1758,6 +1759,25 @@ export function createExternalBackendBridgeRuntime(options: {
       conversationScopeByKey.delete(conversationKey);
       conversationContextSignature.delete(conversationKey);
       return outcome;
+    },
+    invalidateAllHotRuntimes: async () => {
+      const bridgeUrl = normalizeBaseUrl(getBridgeUrl());
+      if (!bridgeUrl) {
+        conversationScopeByKey.clear();
+        conversationContextSignature.clear();
+        return null;
+      }
+      const response = await fetch(`${bridgeUrl}/invalidate-all-hot-runtimes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to invalidate all hot runtimes (${response.status})`);
+      }
+      conversationScopeByKey.clear();
+      conversationContextSignature.clear();
+      return { invalidated: true };
     },
     runExternalAction: async (name, input, opts = {}) => {
       const bridgeUrl = normalizeBaseUrl(getBridgeUrl());

@@ -270,6 +270,14 @@ export async function updateClaudeRuntimeRetention(
   return true;
 }
 
+export async function invalidateAllClaudeHotRuntimes(
+  coreRuntime: AgentRuntime,
+): Promise<void> {
+  const bridgeUrl = getBridgeUrl();
+  if (!bridgeUrl.trim()) return;
+  await getClaudeBridgeRuntime(coreRuntime).invalidateAllHotRuntimes();
+}
+
 export async function invalidateClaudeConversationSession(
   coreRuntime: AgentRuntime,
   params: {
