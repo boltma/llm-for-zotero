@@ -9,6 +9,7 @@
 import type { AgentRuntime } from "../../../agent/runtime";
 import type {
   AgentEvent,
+  AgentPendingAction,
   AgentRunEventRecord,
   AgentRuntimeRequest,
 } from "../../../agent/types";
@@ -18,6 +19,7 @@ import {
   resolveConversationBaseItem,
   resolveDisplayConversationKind,
 } from "../portalScope";
+import { renderPendingActionCard } from "../agentTrace/render";
 
 function buildPendingAgentTraceEvents(body?: Element): AgentRunEventRecord[] {
   const now = Date.now();
@@ -95,6 +97,55 @@ type PanelUpdateHelpers = {
   refreshChatSafely: () => void;
   setStatusSafely: (text: string, kind: StatusKind) => void;
 };
+
+function syncInlineActionCardState(body: Element, ui: PanelRequestUIShape): void {
+  const hasCard = Boolean(ui.chatBox?.querySelector(".llm-action-inline-card"));
+  const panelRoot = body as HTMLElement;
+  if (hasCard) {
+    panelRoot.dataset.hasActionCard = "true";
+  } else {
+    delete panelRoot.dataset.hasActionCard;
+  }
+}
+
+function showInlineConfirmationCard(
+  body: Element,
+  ui: PanelRequestUIShape,
+  requestId: string,
+  action: AgentPendingAction,
+): void {
+  const chatBox = ui.chatBox;
+  const ownerDoc = body.ownerDocument;
+  if (!chatBox || !ownerDoc) return;
+  chatBox.querySelector(".llm-action-inline-card")?.remove();
+  const wrapper = ownerDoc.createElement("div");
+  wrapper.className = "llm-action-inline-card";
+  wrapper.dataset.requestId = requestId;
+  wrapper.appendChild(renderPendingActionCard(ownerDoc, { requestId, action }));
+  chatBox.appendChild(wrapper);
+  chatBox.scrollTop = chatBox.scrollHeight;
+  syncInlineActionCardState(body, ui);
+}
+
+function closeInlineConfirmationCard(
+  body: Element,
+  ui: PanelRequestUIShape,
+  requestId?: string,
+): void {
+  const chatBox = ui.chatBox;
+  if (!chatBox) return;
+  let card: Element | null = null;
+  if (requestId) {
+    card =
+      (Array.from(chatBox.querySelectorAll(".llm-action-inline-card")) as HTMLElement[])
+        .find((entry) => entry.dataset.requestId === requestId) ||
+      chatBox.querySelector(".llm-action-inline-card");
+  } else {
+    card = chatBox.querySelector(".llm-action-inline-card");
+  }
+  card?.remove();
+  syncInlineActionCardState(body, ui);
+}
 
 type EffectiveRequestConfigShape = {
   model: string;
@@ -707,6 +758,14 @@ export async function sendAgentTurn(
             }
             setStatusSafely(event.reason, "sending");
             break;
+          case "confirmation_required":
+            showInlineConfirmationCard(body, ui, event.requestId, event.action);
+            setStatusSafely("Approval required", "sending");
+            return;
+          case "confirmation_resolved":
+            closeInlineConfirmationCard(body, ui, event.requestId);
+            setStatusSafely(event.approved ? "Approval sent" : "Action denied", "sending");
+            return;
           case "message_delta": {
             assistantMessage.pendingFinalText =
               `${assistantMessage.pendingFinalText || ""}${deps.sanitizeText(event.text)}`;
@@ -1127,6 +1186,14 @@ export async function retryAgentTurn(
             }
             setStatusSafely(event.reason, "sending");
             break;
+          case "confirmation_required":
+            showInlineConfirmationCard(body, ui, event.requestId, event.action);
+            setStatusSafely("Approval required", "sending");
+            return;
+          case "confirmation_resolved":
+            closeInlineConfirmationCard(body, ui, event.requestId);
+            setStatusSafely(event.approved ? "Approval sent" : "Action denied", "sending");
+            return;
           case "message_delta": {
             assistantMessage.pendingFinalText =
               `${assistantMessage.pendingFinalText || ""}${deps.sanitizeText(event.text)}`;
