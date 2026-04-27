@@ -2,7 +2,10 @@ import { DEFAULT_SYSTEM_PROMPT } from "../utils/llmDefaults";
 import {
   ensureClaudeProjectSkillStructure,
   getClaudeProjectInstructionFile,
+  getClaudeProjectCommandsDir,
   getClaudeProjectSettingsFile,
+  getClaudeProjectSkillsDir,
+  getClaudeRuntimeRootDir,
 } from "./projectSkills";
 import { getClaudeManagedInstructionTemplatePref } from "./prefs";
 
@@ -38,6 +41,22 @@ function getBootstrapSettingsTemplate(): string {
     null,
     2,
   ) + "\n";
+}
+
+function getConfigModelInstructionLines(): string[] {
+  const runtimeRoot = getClaudeRuntimeRootDir();
+  const settingsFile = getClaudeProjectSettingsFile();
+  const skillsDir = getClaudeProjectSkillsDir();
+  const commandsDir = getClaudeProjectCommandsDir();
+  return [
+    "## Config model",
+    `- Shared Zotero profile runtime root: \`${runtimeRoot}\`.`,
+    `- Project-level Claude config for this Zotero profile lives in \`${settingsFile}\`.`,
+    `- Shared Zotero skills go in \`${skillsDir}/\`; shared commands go in \`${commandsDir}/\`.`,
+    "- Different Zotero profiles use different Claude runtime roots and different local conversation folders.",
+    "- Local config is scoped to the current conversation runtime folder under the profile runtime root.",
+    "- Do not install Zotero-wide skills under the parent `~/Zotero/agent-runtime/.claude/`; that path is legacy and is not the active profile project config.",
+  ];
 }
 
 function getLegacyBootstrapInstructionTemplate(): string {
@@ -84,11 +103,7 @@ export function getDefaultClaudeManagedInstructionBlock(): string {
     "- For library or collection analysis, prefer one local aggregation pass over enumerating large result sets in chat.",
     "- Default to the shortest path that can produce a correct answer.",
     "",
-    "## Config model",
-    "- Project config is shared by all Claude runtimes within the current Zotero profile.",
-    "- Different Zotero profiles use different Claude runtime roots and different local conversation folders.",
-    "- Local config is scoped to the current conversation runtime folder.",
-    "- Put shared Zotero skills in `.claude/skills/` or `.claude/commands/` under the runtime root.",
+    ...getConfigModelInstructionLines(),
   ].join("\n");
 }
 
@@ -105,6 +120,24 @@ function getManagedInstructionBlockFromSettings(): string {
 
 function getBootstrapInstructionTemplate(managedBlock = getManagedInstructionBlockFromSettings()): string {
   return `${MANAGED_BEGIN_MARKER}\n${managedBlock}\n${MANAGED_END_MARKER}\n`;
+}
+
+function upgradeManagedInstructionBlock(content: string): string {
+  const normalized = normalizeManagedInstructionBlockContent(content);
+  if (!normalized) return getDefaultClaudeManagedInstructionBlock();
+  if (normalized.includes("Shared Zotero profile runtime root:")) {
+    return normalized;
+  }
+  const configModelIndex = normalized.indexOf("\n## Config model");
+  const configModelAtStart = normalized.startsWith("## Config model");
+  const replacement = getConfigModelInstructionLines().join("\n");
+  if (configModelIndex >= 0) {
+    return `${normalized.slice(0, configModelIndex)}\n${replacement}`;
+  }
+  if (configModelAtStart) {
+    return replacement;
+  }
+  return `${normalized}\n\n${replacement}`;
 }
 
 async function writeIfMissing(path: string, content: string): Promise<void> {
@@ -141,10 +174,31 @@ function spliceManagedInstructionBlock(onDiskRaw: string, managedBlock: string):
 }
 
 async function ensureManagedClaudeInstructionBlock(): Promise<void> {
-  await writeIfMissing(
-    getClaudeProjectInstructionFile(),
-    getBootstrapInstructionTemplate(),
-  );
+  const io = getIOUtils();
+  if (!io?.exists || !io?.write || !io?.read) {
+    await writeIfMissing(
+      getClaudeProjectInstructionFile(),
+      getBootstrapInstructionTemplate(),
+    );
+    return;
+  }
+  const path = getClaudeProjectInstructionFile();
+  const exists = await io.exists(path).catch(() => false);
+  if (!exists) {
+    await io.write(path, new TextEncoder().encode(getBootstrapInstructionTemplate()));
+    return;
+  }
+  const raw = await io.read(path).catch(() => null);
+  if (!raw) return;
+  const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+  const current = new TextDecoder("utf-8").decode(bytes);
+  const currentManaged = extractManagedInstructionBlock(current);
+  if (!currentManaged) return;
+  const upgradedManaged = upgradeManagedInstructionBlock(currentManaged);
+  if (upgradedManaged === currentManaged) return;
+  const next = spliceManagedInstructionBlock(current, upgradedManaged);
+  if (next === current) return;
+  await io.write(path, new TextEncoder().encode(next));
 }
 
 export async function readClaudeProjectManagedInstructionBlock(): Promise<string | null> {
