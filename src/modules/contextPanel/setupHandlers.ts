@@ -359,7 +359,6 @@ import { renderShortcuts } from "./shortcuts";
 import { loadConversationHistoryScope } from "./historyLoader";
 import { loadClaudeConversationHistoryScope } from "../../claudeCode/historyLoader";
 import {
-  buildClaudeReasoningConfig,
   buildClaudeScope,
   getClaudeRuntimeModelEntries,
   getSelectedClaudeRuntimeEntry,
@@ -7184,6 +7183,16 @@ export function setupHandlers(
     return "Auto";
   };
 
+  const buildClaudeReasoningConfigForDisplayMode = (
+    mode: ClaudeReasoningDisplayMode,
+  ): LLMReasoningConfig | undefined => {
+    if (mode === "auto") return undefined;
+    return {
+      provider: "anthropic",
+      level: mode === "max" ? "xhigh" : mode,
+    };
+  };
+
   const clearClaudeReasoningDisplayOverride = () => {
     claudeReasoningDisplayOverride = null;
   };
@@ -8175,7 +8184,9 @@ export function setupHandlers(
   const getSelectedReasoning = (): LLMReasoningConfig | undefined => {
     if (!item) return undefined;
     if (isClaudeConversationSystem()) {
-      return buildClaudeReasoningConfig();
+      return buildClaudeReasoningConfigForDisplayMode(
+        getClaudeReasoningDisplayMode(),
+      );
     }
     const { provider, enabledLevels, selectedLevel } = getReasoningState();
     if (provider === "unsupported" || selectedLevel === "none")
